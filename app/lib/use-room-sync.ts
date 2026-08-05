@@ -11,6 +11,18 @@ export type RoomPlayer = {
 };
 
 type RoomEvent = { type: "start" } | { type: "phase"; phase: "night" | "day" };
+export type RoomChat = { id: string; name: string; emoji: string; text: string };
+
+const profileOptions = [
+  { emoji: "🦊", color: "orange" },
+  { emoji: "🌻", color: "yellow" },
+  { emoji: "🐸", color: "green" },
+  { emoji: "🪩", color: "pink" },
+  { emoji: "🧢", color: "blue" },
+  { emoji: "🌙", color: "purple" },
+  { emoji: "🐙", color: "coral" },
+  { emoji: "🦋", color: "mint" },
+];
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
@@ -20,22 +32,29 @@ export function useRoomSync({
   code,
   name,
   enabled,
+  role,
 }: {
   code: string;
   name: string;
   enabled: boolean;
+  role: "player" | "display";
 }) {
   const channelRef = useRef<RealtimeChannel | null>(null);
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
   const [event, setEvent] = useState<RoomEvent | null>(null);
+  const [chat, setChat] = useState<RoomChat[]>([]);
+  const profile = useMemo(
+    () => profileOptions[Math.abs([...name].reduce((sum, character) => sum + character.charCodeAt(0), 0)) % profileOptions.length],
+    [name],
+  );
 
   useEffect(() => {
-    if (!enabled || !supabase || !code || !name) return;
+    if (!enabled || !supabase || !code || (role === "player" && !name)) return;
 
     const channel = supabase.channel(`room:${code}`, {
       config: {
         broadcast: { self: true },
-        presence: { key: `${name}-${crypto.randomUUID()}` },
+        presence: { key: `${name || "display"}-${crypto.randomUUID()}` },
       },
     });
     channelRef.current = channel;
@@ -56,17 +75,29 @@ export function useRoomSync({
           setEvent({ type: "phase", phase: payload.phase });
         }
       })
+      .on("broadcast", { event: "chat-message" }, ({ payload }) => {
+        if (payload?.id && payload?.name && payload?.text) {
+          setChat((current) => [...current.slice(-39), payload as RoomChat]);
+        }
+      })
       .subscribe(async (status) => {
-        if (status === "SUBSCRIBED") {
-          await channel.track({ name, emoji: "🦊", color: "orange" });
+        if (status === "SUBSCRIBED" && role === "player") {
+          await channel.track({ name, ...profile });
         }
       });
 
-    return () => {
-      channelRef.current = null;
+    const leaveRoom = () => {
+      void channel.untrack();
       void supabase.removeChannel(channel);
     };
-  }, [code, enabled, name]);
+    window.addEventListener("pagehide", leaveRoom);
+
+    return () => {
+      channelRef.current = null;
+      window.removeEventListener("pagehide", leaveRoom);
+      leaveRoom();
+    };
+  }, [code, enabled, name, profile, role]);
 
   const send = useMemo(
     () => async (nextEvent: RoomEvent) => {
@@ -82,5 +113,18 @@ export function useRoomSync({
     [],
   );
 
-  return { enabled: Boolean(supabase), players, event, send };
+  const sendChat = useMemo(
+    () => async (text: string) => {
+      const channel = channelRef.current;
+      if (!channel || !text.trim()) return;
+      await channel.send({
+        type: "broadcast",
+        event: "chat-message",
+        payload: { id: crypto.randomUUID(), name, emoji: profile.emoji, text: text.trim() },
+      });
+    },
+    [name, profile],
+  );
+
+  return { enabled: Boolean(supabase), players, event, chat, send, sendChat };
 }
