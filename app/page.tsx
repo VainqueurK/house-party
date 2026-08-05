@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   ChevronLeft,
@@ -15,6 +15,7 @@ import {
   Users,
   WandSparkles,
 } from "lucide-react";
+import { useRoomSync, type RoomPlayer } from "./lib/use-room-sync";
 
 type Avatar = { name: string; emoji: string; color: string; status?: string };
 
@@ -36,11 +37,41 @@ export default function Home() {
   const [night, setNight] = useState(false);
   const [round, setRound] = useState(1);
   const [phase, setPhase] = useState<"night" | "day">("night");
+  const [isHost, setIsHost] = useState(false);
 
-  const players = useMemo(() => [
+  useEffect(() => {
+    const roomFromLink = new URLSearchParams(window.location.search).get("room");
+    if (roomFromLink) {
+      setCode(roomFromLink.toUpperCase());
+      setView("join");
+    }
+  }, []);
+
+  const sync = useRoomSync({
+    code,
+    name: name || (isHost ? "Host" : ""),
+    enabled: view === "lobby" || view === "game",
+  });
+
+  useEffect(() => {
+    if (!sync.event) return;
+    if (sync.event.type === "start") {
+      setView("game");
+      setTimeout(speak, 250);
+    } else {
+      setPhase(sync.event.phase);
+      setTimeout(speak, 100);
+    }
+    // Events are one-shot messages; this effect intentionally consumes each value.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.event]);
+
+  const demoPlayers = useMemo(() => [
     ...avatars.slice(0, 5),
-    ...(name ? [{ name, emoji: "🦊", color: "orange", status: "You" }] : []),
-  ], [name]);
+    ...(name ? [{ name, emoji: "🦊", color: "orange", status: "You" }] : isHost ? [{ name: "Host", emoji: "🦊", color: "orange", status: "You" }] : []),
+  ], [isHost, name]);
+
+  const players: (Avatar | RoomPlayer)[] = sync.enabled && sync.players.length > 0 ? sync.players : demoPlayers;
 
   function speak() {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
@@ -58,6 +89,7 @@ export default function Home() {
 
   function startGame() {
     setView("game");
+    void sync.send({ type: "start" });
     setTimeout(speak, 350);
   }
 
@@ -65,6 +97,7 @@ export default function Home() {
     const next = phase === "night" ? "day" : "night";
     setPhase(next);
     if (next === "night") setRound((value) => value + 1);
+    void sync.send({ type: "phase", phase: next });
     setTimeout(speak, 100);
   }
 
@@ -91,7 +124,7 @@ export default function Home() {
             <h1>Make a night<br />of <em>anything.</em></h1>
             <p className="hero-text">Social games for the people you love, the screen in the corner, and one very dramatic narrator.</p>
             <div className="hero-actions">
-              <button className="primary-button" onClick={() => setView("lobby")}>Create a room <ArrowRight size={17} /></button>
+              <button className="primary-button" onClick={() => { setIsHost(true); setName("Host"); setView("lobby"); }}>Create a room <ArrowRight size={17} /></button>
               <button className="text-button" onClick={() => setView("join")}>Join with a code</button>
             </div>
             <div className="hero-note"><span className="note-avatars">👩🏾‍🦱 🧔🏻 👩🏻‍🦰</span> No accounts. No downloads. Just pass the popcorn.</div>
@@ -113,8 +146,8 @@ export default function Home() {
         </section>
       </>}
 
-      {view === "join" && <JoinScreen code={code} setCode={setCode} name={name} setName={setName} onBack={() => setView("home")} onJoin={() => setView("lobby")} />}
-      {view === "lobby" && <Lobby code={code} players={players} copied={copied} onCopy={() => { setCopied(true); navigator.clipboard?.writeText(code); setTimeout(() => setCopied(false), 1500); }} onBack={() => setView("home")} onStart={startGame} />}
+      {view === "join" && <JoinScreen code={code} setCode={setCode} name={name} setName={setName} onBack={() => setView("home")} onJoin={() => { setIsHost(false); setView("lobby"); }} />}
+      {view === "lobby" && <Lobby code={code} players={players} copied={copied} onCopy={() => { setCopied(true); navigator.clipboard?.writeText(`${window.location.origin}/?room=${code}`); setTimeout(() => setCopied(false), 1500); }} onBack={() => setView("home")} onStart={startGame} />}
       {view === "game" && <GameBoard phase={phase} round={round} players={players} narrating={narrating} onSpeak={speak} onAdvance={advancePhase} />}
     </main>
   );
