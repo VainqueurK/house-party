@@ -6,9 +6,6 @@
 */
 @layer tailwind, app, mantine;
 
-@import "@datavant/dart/styles.layer.css" layer(mantine);
-@import "tailwindcss" layer(tailwind);
-
 @layer app {
   :root {
     color-scheme: light;
