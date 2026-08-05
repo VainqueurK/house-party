@@ -1,5 +1,22 @@
 export type PalermoRole = "mafia" | "detective" | "doctor" | "villager";
-export type PalermoPhase = "role-reveal" | "night" | "discussion" | "voting" | "result" | "won";
+export type PalermoPhase =
+  | "role-reveal"
+  | "night"
+  | "night-result"
+  | "discussion"
+  | "voting"
+  | "vote-result"
+  | "won";
+
+export type PalermoCinematic =
+  | {
+      id: string;
+      kind: "night";
+      attackedId?: string;
+      killedId?: string;
+      protected: boolean;
+    }
+  | { id: string; kind: "vote"; eliminatedId?: string; tied: boolean };
 
 export type PalermoPlayer = {
   id: string;
@@ -18,10 +35,15 @@ export type PalermoState = {
   eliminatedId?: string;
   resultText?: string;
   winner?: "mafia" | "town";
+  cinematic?: PalermoCinematic;
 };
 
 export type PalermoRoles = Record<string, PalermoRole>;
-export type PalermoActions = { mafiaTarget?: string; doctorTarget?: string; detectiveTarget?: string };
+export type PalermoActions = {
+  mafiaTarget?: string;
+  doctorTarget?: string;
+  detectiveTarget?: string;
+};
 
 export function roleDeck(playerCount: number): PalermoRole[] {
   const mafia = playerCount >= 7 ? 2 : 1;
@@ -33,36 +55,68 @@ export function roleDeck(playerCount: number): PalermoRole[] {
 }
 
 export function assignRoles(players: PalermoPlayer[]): PalermoRoles {
-  const shuffled = [...roleDeck(players.length)].sort(() => Math.random() - 0.5);
-  return Object.fromEntries(players.map((player, index) => [player.id, shuffled[index]]));
+  const shuffled = [...roleDeck(players.length)].sort(
+    () => Math.random() - 0.5,
+  );
+  return Object.fromEntries(
+    players.map((player, index) => [player.id, shuffled[index]]),
+  );
 }
 
-export function resolveNight(players: PalermoPlayer[], roles: PalermoRoles, actions: PalermoActions) {
-  const alive = new Set(players.filter((player) => player.alive).map((player) => player.id));
-  const mafiaTarget = actions.mafiaTarget && alive.has(actions.mafiaTarget) ? actions.mafiaTarget : undefined;
-  const saved = actions.doctorTarget && alive.has(actions.doctorTarget) ? actions.doctorTarget : undefined;
-  const killedId = mafiaTarget && mafiaTarget !== saved ? mafiaTarget : undefined;
-  const nextPlayers = players.map((player) => ({ ...player, alive: player.alive && player.id !== killedId }));
+export function resolveNight(
+  players: PalermoPlayer[],
+  roles: PalermoRoles,
+  actions: PalermoActions,
+) {
+  const alive = new Set(
+    players.filter((player) => player.alive).map((player) => player.id),
+  );
+  const mafiaTarget =
+    actions.mafiaTarget && alive.has(actions.mafiaTarget)
+      ? actions.mafiaTarget
+      : undefined;
+  const saved =
+    actions.doctorTarget && alive.has(actions.doctorTarget)
+      ? actions.doctorTarget
+      : undefined;
+  const killedId =
+    mafiaTarget && mafiaTarget !== saved ? mafiaTarget : undefined;
+  const nextPlayers = players.map((player) => ({
+    ...player,
+    alive: player.alive && player.id !== killedId,
+  }));
   return { players: nextPlayers, killedId };
 }
 
-export function resolveVote(players: PalermoPlayer[], votes: Record<string, string>) {
-  const counts = Object.values(votes).reduce<Record<string, number>>((result, target) => {
-    result[target] = (result[target] ?? 0) + 1;
-    return result;
-  }, {});
+export function resolveVote(
+  players: PalermoPlayer[],
+  votes: Record<string, string>,
+) {
+  const counts = Object.values(votes).reduce<Record<string, number>>(
+    (result, target) => {
+      result[target] = (result[target] ?? 0) + 1;
+      return result;
+    },
+    {},
+  );
   const ranked = Object.entries(counts).sort(([, a], [, b]) => b - a);
   const top = ranked[0];
   const tied = top && ranked[1] && ranked[1][1] === top[1];
   const eliminatedId = top && !tied ? top[0] : undefined;
   return {
-    players: players.map((player) => ({ ...player, alive: player.alive && player.id !== eliminatedId })),
+    players: players.map((player) => ({
+      ...player,
+      alive: player.alive && player.id !== eliminatedId,
+    })),
     eliminatedId,
     tied: Boolean(tied),
   };
 }
 
-export function winnerFor(players: PalermoPlayer[], roles: PalermoRoles): "mafia" | "town" | undefined {
+export function winnerFor(
+  players: PalermoPlayer[],
+  roles: PalermoRoles,
+): "mafia" | "town" | undefined {
   const alive = players.filter((player) => player.alive);
   const mafia = alive.filter((player) => roles[player.id] === "mafia").length;
   if (mafia === 0) return "town";
@@ -73,8 +127,9 @@ export function winnerFor(players: PalermoPlayer[], roles: PalermoRoles): "mafia
 export const PHASE_LENGTHS: Record<PalermoPhase, number> = {
   "role-reveal": 25,
   night: 35,
+  "night-result": 10,
   discussion: 60,
   voting: 30,
-  result: 8,
+  "vote-result": 9,
   won: 0,
 };
