@@ -10,6 +10,7 @@ export type PalermoPlayer = {
 };
 
 export type PalermoState = {
+  revision: number;
   phase: PalermoPhase;
   round: number;
   endsAt: number;
