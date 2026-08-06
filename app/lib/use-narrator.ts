@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { KokoroTTS } from "kokoro-js";
 
 export type NarratorStatus =
   | "idle"
@@ -10,9 +9,24 @@ export type NarratorStatus =
   | "speaking"
   | "fallback";
 
+type WorkerResponse =
+  | { type: "progress"; id: string; progress: number }
+  | { type: "prepared"; id: string }
+  | { type: "audio"; id: string; buffer: ArrayBuffer; mime: string }
+  | { type: "error"; id: string; message: string };
+
+type PendingRequest = {
+  resolve: (response: WorkerResponse) => void;
+  reject: (error: Error) => void;
+};
+
 export function useNarrator() {
-  const modelRef = useRef<KokoroTTS | null>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const readyRef = useRef(false);
+  const preparePromise = useRef<Promise<boolean> | null>(null);
+  const pending = useRef(new Map<string, PendingRequest>());
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeSpeech = useRef(0);
   const [status, setStatus] = useState<NarratorStatus>("idle");
   const [progress, setProgress] = useState(0);
 
@@ -37,50 +51,92 @@ export function useNarrator() {
     window.speechSynthesis.speak(utterance);
   }, []);
 
-  const prepare = useCallback(async () => {
-    if (modelRef.current) return true;
-    setStatus("loading");
-    try {
-      const { KokoroTTS } = await import("kokoro-js");
-      modelRef.current = await KokoroTTS.from_pretrained(
-        "onnx-community/Kokoro-82M-v1.0-ONNX",
-        {
-          dtype: "q8",
-          device: "wasm",
-          progress_callback: (event) => {
-            if ("progress" in event && typeof event.progress === "number")
-              setProgress(Math.round(event.progress));
-          },
-        },
-      );
-      setProgress(100);
-      setStatus("ready");
-      return true;
-    } catch (error) {
-      console.warn(
-        "Natural narrator could not load; using a device voice.",
-        error,
-      );
-      setStatus("fallback");
-      return false;
-    }
+  const getWorker = useCallback(() => {
+    if (workerRef.current) return workerRef.current;
+    const worker = new Worker(
+      new URL("../workers/narrator.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+      const response = event.data;
+      if (response.type === "progress") {
+        setProgress(response.progress);
+        return;
+      }
+      const request = pending.current.get(response.id);
+      if (!request) return;
+      pending.current.delete(response.id);
+      if (response.type === "error")
+        request.reject(new Error(response.message));
+      else request.resolve(response);
+    };
+    worker.onerror = (event) => {
+      const error = new Error(event.message || "Narrator worker failed");
+      pending.current.forEach((request) => request.reject(error));
+      pending.current.clear();
+      worker.terminate();
+      workerRef.current = null;
+    };
+    workerRef.current = worker;
+    return worker;
   }, []);
+
+  const requestWorker = useCallback(
+    (
+      request:
+        | { type: "prepare"; id: string }
+        | { type: "speak"; id: string; text: string },
+    ) =>
+      new Promise<WorkerResponse>((resolve, reject) => {
+        pending.current.set(request.id, { resolve, reject });
+        getWorker().postMessage(request);
+      }),
+    [getWorker],
+  );
+
+  const prepare = useCallback(async () => {
+    if (readyRef.current) return true;
+    if (preparePromise.current) return preparePromise.current;
+    setStatus("loading");
+    const id = crypto.randomUUID();
+    preparePromise.current = requestWorker({ type: "prepare", id })
+      .then(() => {
+        readyRef.current = true;
+        setProgress(100);
+        setStatus("ready");
+        return true;
+      })
+      .catch((error) => {
+        console.warn(
+          "Natural narrator could not load; using a device voice.",
+          error,
+        );
+        setStatus("fallback");
+        return false;
+      })
+      .finally(() => {
+        preparePromise.current = null;
+      });
+    return preparePromise.current;
+  }, [requestWorker]);
 
   const speak = useCallback(
     async (text: string) => {
+      const speechId = ++activeSpeech.current;
       audioRef.current?.pause();
       window.speechSynthesis?.cancel();
-      if (!modelRef.current) {
-        const ready = await prepare();
-        if (!ready || !modelRef.current) return fallback(text);
-      }
+      const ready = readyRef.current || (await prepare());
+      if (!ready) return fallback(text);
       try {
         setStatus("speaking");
-        const audio = await modelRef.current.generate(text, {
-          voice: "bf_emma",
-          speed: 0.94,
+        const id = crypto.randomUUID();
+        const response = await requestWorker({ type: "speak", id, text });
+        if (response.type !== "audio" || speechId !== activeSpeech.current)
+          return;
+        const blob = new Blob([response.buffer], {
+          type: response.mime || "audio/wav",
         });
-        const url = URL.createObjectURL(audio.toBlob());
+        const url = URL.createObjectURL(blob);
         const player = new Audio(url);
         audioRef.current = player;
         player.onended = () => {
@@ -97,14 +153,15 @@ export function useNarrator() {
         fallback(text);
       }
     },
-    [fallback, prepare],
+    [fallback, prepare, requestWorker],
   );
 
   const stop = useCallback(() => {
+    activeSpeech.current += 1;
     audioRef.current?.pause();
     audioRef.current = null;
     window.speechSynthesis?.cancel();
-    setStatus(modelRef.current ? "ready" : "idle");
+    setStatus(readyRef.current ? "ready" : "idle");
   }, []);
 
   return { status, progress, prepare, speak, stop };

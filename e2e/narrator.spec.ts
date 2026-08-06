@@ -8,7 +8,8 @@ test("natural narrator model loads in the host browser", async ({ page }) => {
     "aria-checked",
     "true",
   );
-  await page.getByTestId("prepare-narrator").click();
+  // Creating a narrated room preloads the voice while players gather. The
+  // button therefore transitions through loading without an explicit click.
   await expect(page.getByTestId("prepare-narrator")).toHaveText(
     "Natural voice ready",
     { timeout: 170_000 },

@@ -276,6 +276,7 @@ export default function Home() {
     setDisplayState(null);
     setRoles({});
     setView("lobby");
+    if (narrationEnabled) void narrator.prepare();
     history.replaceState({}, "", `/?room=${nextCode}&display=1`);
   }
 
@@ -1238,6 +1239,10 @@ function GameBoard({
     state.phase === "night-result" || state.phase === "vote-result";
   const waitingForActions =
     requiredActionCount > 0 && actionCount < requiredActionCount && seconds > 0;
+  const townIsMoving =
+    (state.phase === "night" && seconds > PHASE_LENGTHS.night - 8) ||
+    (state.phase === "discussion" && seconds > PHASE_LENGTHS.discussion - 6);
+  const phaseBlocked = waitingForActions || townIsMoving;
   const headline = won ? (
     state.winner === "town" ? (
       "The town wins."
@@ -1417,16 +1422,20 @@ function GameBoard({
         {!won && (
           <button
             className="phase-button"
-            disabled={waitingForActions}
+            disabled={phaseBlocked}
             onClick={onAdvance}
           >
             {waitingForActions
               ? "Waiting for choices"
-              : seconds > 0
-                ? cinematic
-                  ? "Skip cinematic"
-                  : "Continue early"
-                : "Continue"}{" "}
+              : townIsMoving
+                ? state.phase === "night"
+                  ? "Town is going home"
+                  : "Town is waking up"
+                : seconds > 0
+                  ? cinematic
+                    ? "Skip cinematic"
+                    : "Continue early"
+                  : "Continue"}{" "}
             <ArrowRight size={16} />
           </button>
         )}

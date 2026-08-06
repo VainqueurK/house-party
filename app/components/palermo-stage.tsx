@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
 import { Html, Sparkles, useAnimations, useGLTF } from "@react-three/drei";
@@ -20,6 +21,7 @@ import {
 } from "../lib/palermo";
 
 type Quality = "cinematic" | "performance";
+type ProgressRef = MutableRefObject<number>;
 
 const ASSET = "/assets/kenney-graveyard";
 const CHARACTER_ASSET = "/assets/kenney-mini-characters";
@@ -206,17 +208,49 @@ function homePosition(index: number, count: number): [number, number, number] {
     [6.35, 0, -4.15],
     [-6.9, 0, -0.15],
   ];
-  return homes[index % Math.min(homes.length, Math.max(count, 1))];
+  const routeOrder = [2, 3, 4, 0, 1, 5];
+  return homes[
+    routeOrder[index % Math.min(routeOrder.length, Math.max(count, 1))]
+  ];
+}
+
+function residentRoute(
+  start: [number, number, number],
+  end: [number, number, number],
+  progress: number,
+) {
+  const length = Math.hypot(start[0], start[2]) || 1;
+  const lane = new THREE.Vector3(
+    (start[0] / length) * 5,
+    0,
+    (start[2] / length) * 4.45,
+  );
+  const from = new THREE.Vector3(...start);
+  const to = new THREE.Vector3(...end);
+  if (progress < 0.36) {
+    const laneProgress = THREE.MathUtils.smootherstep(progress / 0.36, 0, 1);
+    return from.lerp(lane, laneProgress);
+  }
+  const homeProgress = THREE.MathUtils.smootherstep(
+    (progress - 0.36) / 0.64,
+    0,
+    1,
+  );
+  return lane.lerp(to, homeProgress);
 }
 
 function AnimatedResident({
   variant,
-  mode,
   progress,
+  state,
+  killed,
+  ejected,
 }: {
   variant: string;
-  mode: "idle" | "walk" | "die" | "eject";
-  progress: number;
+  progress: ProgressRef;
+  state: PalermoState;
+  killed: boolean;
+  ejected: boolean;
 }) {
   const { scene, animations } = useGLTF(`${CHARACTER_ASSET}/${variant}.glb`);
   const character = useMemo(() => {
@@ -230,37 +264,43 @@ function AnimatedResident({
     return copy;
   }, [scene]);
   const { actions } = useAnimations(animations, character);
+  const currentAction = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    Object.values(actions).forEach((action) => action?.stop());
-    const name =
-      mode === "walk"
-        ? "walk"
-        : mode === "die"
-          ? "die"
-          : mode === "eject"
-            ? "emote-no"
-            : "idle";
-    const action = actions[name];
-    if (!action) return;
-    action.reset().fadeIn(0.16).play();
-    if (mode === "die") {
-      action.setLoop(THREE.LoopOnce, 1);
-      action.clampWhenFinished = true;
-      action.paused = true;
-    }
+    const idle = actions.idle;
+    idle?.reset().play();
+    currentAction.current = idle ? "idle" : undefined;
     return () => {
-      action.fadeOut(0.12);
+      Object.values(actions).forEach((action) => action?.stop());
     };
-  }, [actions, mode]);
+  }, [actions]);
 
   useFrame(() => {
+    const phaseProgress = progress.current;
+    const walkingHome = state.phase === "night" && phaseProgress < 0.28;
+    const walkingToSquare = state.phase === "discussion" && phaseProgress < 0.1;
+    const desired = killed
+      ? "die"
+      : ejected
+        ? "emote-no"
+        : walkingHome || walkingToSquare
+          ? "walk"
+          : "idle";
+    if (currentAction.current !== desired && actions[desired]) {
+      const previous = currentAction.current
+        ? actions[currentAction.current]
+        : undefined;
+      const next = actions[desired];
+      next?.reset().play();
+      if (previous && next) next.crossFadeFrom(previous, 0.28, true);
+      currentAction.current = desired;
+    }
     const death = actions.die;
-    if (mode === "die" && death) {
+    if (killed && death) {
       death.paused = true;
       death.time =
         death.getClip().duration *
-        THREE.MathUtils.smoothstep(progress, 0.18, 0.62);
+        THREE.MathUtils.smoothstep(phaseProgress, 0.18, 0.62);
     }
   });
 
@@ -278,10 +318,10 @@ function Resident({
   index: number;
   count: number;
   state: PalermoState;
-  progress: number;
+  progress: ProgressRef;
 }) {
   const group = useRef<THREE.Group>(null);
-  const initialized = useRef(false);
+  const label = useRef<HTMLDivElement>(null);
   const position = playerPosition(index, count);
   const home = homePosition(index, count);
   const isNightTarget =
@@ -296,87 +336,106 @@ function Resident({
     state.phase === "vote-result" &&
     state.cinematic?.kind === "vote" &&
     state.cinematic.eliminatedId === player.id;
-  const showResident =
-    (player.alive &&
-      (state.phase !== "night-result" || isNightTarget) &&
-      (state.phase !== "night" || progress < 0.82)) ||
-    isCinematicTarget ||
-    isVoteTarget;
   useFrame((_, delta) => {
     if (!group.current) return;
-    const goingHome = state.phase === "night";
-    const atHome = state.phase === "night-result" && isNightTarget;
-    const walk = goingHome
-      ? THREE.MathUtils.smoothstep(progress, 0.05, 0.72)
-      : atHome
-        ? 1
-        : 0;
-    const eject = isVoteTarget
-      ? THREE.MathUtils.smoothstep(progress, 0.08, 0.38)
-      : 0;
-    const desiredX = THREE.MathUtils.lerp(position[0], home[0], walk);
-    const desiredZ = THREE.MathUtils.lerp(position[2], home[2], walk);
-    if (!initialized.current) {
-      group.current.position.set(desiredX, eject * 7.5, desiredZ);
-      group.current.rotation.y = Math.atan2(-position[0], -position[2]);
-      initialized.current = true;
+    const phaseProgress = progress.current;
+    let x = position[0];
+    let y = 0;
+    let z = position[2];
+    let scale = 1;
+    let visible = player.alive;
+    let facing = Math.atan2(-position[0], -position[2]);
+
+    if (state.phase === "night") {
+      const travel = THREE.MathUtils.smoothstep(phaseProgress, 0.02, 0.23);
+      const routed = residentRoute(position, home, travel);
+      const next = residentRoute(position, home, Math.min(1, travel + 0.015));
+      x = routed.x;
+      z = routed.z;
+      y = Math.sin(travel * Math.PI) * 0.08;
+      facing = Math.atan2(next.x - routed.x, next.z - routed.z);
+      const doorwayFade = THREE.MathUtils.smoothstep(phaseProgress, 0.22, 0.28);
+      scale = 1 - doorwayFade * 0.65;
+      visible = player.alive && doorwayFade < 0.99;
+    } else if (state.phase === "night-result") {
+      x = home[0];
+      z = home[2];
+      facing = Math.atan2(-home[0], -home[2]);
+      visible = isNightTarget;
+    } else if (state.phase === "discussion") {
+      const returnToSquare = THREE.MathUtils.smoothstep(
+        phaseProgress,
+        0.01,
+        0.09,
+      );
+      const reverseProgress = 1 - returnToSquare;
+      const routed = residentRoute(position, home, reverseProgress);
+      const next = residentRoute(
+        position,
+        home,
+        Math.max(0, reverseProgress - 0.015),
+      );
+      x = routed.x;
+      z = routed.z;
+      y = Math.sin(returnToSquare * Math.PI) * 0.08;
+      facing =
+        returnToSquare < 0.98
+          ? Math.atan2(next.x - routed.x, next.z - routed.z)
+          : Math.atan2(-position[0], -position[2]);
+    } else if (isVoteTarget) {
+      const eject = THREE.MathUtils.smoothstep(phaseProgress, 0.07, 0.48);
+      const lift = eject * eject * (3 - 2 * eject);
+      x = THREE.MathUtils.lerp(position[0], 0, lift);
+      z = THREE.MathUtils.lerp(position[2], 0, lift);
+      y = lift * 6.4 + Math.sin(lift * Math.PI) * 0.45;
+      scale = 1 - THREE.MathUtils.smoothstep(phaseProgress, 0.43, 0.62) * 0.92;
+      visible = scale > 0.09;
+      group.current.rotation.y += delta * (2.4 + lift * 8);
+      group.current.rotation.z = Math.sin(lift * Math.PI * 4) * 0.22;
     }
-    group.current.position.x = THREE.MathUtils.damp(
-      group.current.position.x,
-      THREE.MathUtils.lerp(desiredX, 0, eject),
-      8,
-      delta,
-    );
-    group.current.position.z = THREE.MathUtils.damp(
-      group.current.position.z,
-      THREE.MathUtils.lerp(desiredZ, 0, eject),
-      8,
-      delta,
-    );
-    group.current.rotation.z = Math.sin(eject * Math.PI * 5) * eject * 0.32;
-    if (eject > 0) group.current.rotation.y += eject * delta * 6;
-    else
+
+    group.current.position.set(x, y, z);
+    group.current.scale.setScalar(scale);
+    if (!isVoteTarget) {
       group.current.rotation.y = THREE.MathUtils.damp(
         group.current.rotation.y,
-        Math.atan2(-position[0], -position[2]),
-        7,
+        facing,
+        9,
         delta,
       );
-    group.current.position.y = THREE.MathUtils.damp(
-      group.current.position.y,
-      eject * 5.2,
-      7,
-      delta,
-    );
-    group.current.visible = showResident;
+      group.current.rotation.z = THREE.MathUtils.damp(
+        group.current.rotation.z,
+        0,
+        10,
+        delta,
+      );
+    }
+    group.current.visible = visible || isCinematicTarget || isVoteTarget;
+    if (label.current) {
+      label.current.style.opacity = visible ? "1" : "0";
+      label.current.style.transform = `scale(${Math.max(0.75, scale)})`;
+    }
   });
-  const animationMode = isCinematicTarget
-    ? "die"
-    : isVoteTarget
-      ? "eject"
-      : state.phase === "night"
-        ? "walk"
-        : "idle";
   return (
     <group ref={group}>
       <AnimatedResident
         variant={CHARACTER_VARIANTS[index % CHARACTER_VARIANTS.length]}
-        mode={animationMode}
         progress={progress}
+        state={state}
+        killed={isCinematicTarget}
+        ejected={isVoteTarget}
       />
-      {showResident && (
-        <Html
-          center
-          position={[0, 2.35, 0]}
-          distanceFactor={9}
-          style={{ pointerEvents: "none" }}
-        >
-          <div className="resident-label">
-            <span>{player.emoji}</span>
-            {player.name}
-          </div>
-        </Html>
-      )}
+      <Html
+        center
+        position={[0, 2.35, 0]}
+        distanceFactor={9}
+        style={{ pointerEvents: "none" }}
+      >
+        <div ref={label} className="resident-label">
+          <span>{player.emoji}</span>
+          {player.name}
+        </div>
+      </Html>
     </group>
   );
 }
@@ -386,7 +445,7 @@ function ShadowFigure({
   progress,
 }: {
   state: PalermoState;
-  progress: number;
+  progress: ProgressRef;
 }) {
   const group = useRef<THREE.Group>(null);
   const targetIndex = state.players.findIndex(
@@ -399,12 +458,13 @@ function ShadowFigure({
   const target = homePosition(Math.max(0, targetIndex), state.players.length);
   useFrame(() => {
     if (!group.current) return;
-    const approach = THREE.MathUtils.smoothstep(progress, 0.02, 0.38);
+    const phaseProgress = progress.current;
+    const approach = THREE.MathUtils.smoothstep(phaseProgress, 0.02, 0.38);
     const retreat =
       state.cinematic?.kind === "night" && state.cinematic.protected
-        ? THREE.MathUtils.smoothstep(progress, 0.4, 0.85)
+        ? THREE.MathUtils.smoothstep(phaseProgress, 0.4, 0.85)
         : 0;
-    const amount = approach * (1 - retreat);
+    const amount = THREE.MathUtils.smootherstep(approach * (1 - retreat), 0, 1);
     group.current.position.set(
       THREE.MathUtils.lerp(-7, target[0] * 0.82, amount),
       0,
@@ -429,14 +489,14 @@ function ShadowFigure({
       <pointLight
         position={[0, 1.4, 0.15]}
         color="#b33035"
-        intensity={progress > 0.48 ? 4 : 0.4}
+        intensity={4}
         distance={3}
       />
     </group>
   );
 }
 
-function Assassin({ progress }: { progress: number }) {
+function Assassin({ progress }: { progress: ProgressRef }) {
   const { scene, animations } = useGLTF(
     `${CHARACTER_ASSET}/character-male-e.glb`,
   );
@@ -471,7 +531,7 @@ function Assassin({ progress }: { progress: number }) {
     action.paused = true;
     action.time =
       action.getClip().duration *
-      THREE.MathUtils.smoothstep(progress, 0.16, 0.46);
+      THREE.MathUtils.smoothstep(progress.current, 0.16, 0.46);
   });
   return <primitive object={assassin} scale={2.75} />;
 }
@@ -481,42 +541,48 @@ function Protection({
   progress,
 }: {
   state: PalermoState;
-  progress: number;
+  progress: ProgressRef;
 }) {
-  if (
-    state.phase !== "night-result" ||
-    state.cinematic?.kind !== "night" ||
-    !state.cinematic.protected ||
-    !state.cinematic.attackedId
-  )
-    return null;
-  const cinematic = state.cinematic;
-  const index = state.players.findIndex(
-    (player) => player.id === cinematic.attackedId,
-  );
+  const shield = useRef<THREE.Group>(null);
+  const active =
+    state.phase === "night-result" &&
+    state.cinematic?.kind === "night" &&
+    state.cinematic.protected &&
+    Boolean(state.cinematic.attackedId);
+  const attackedId =
+    state.cinematic?.kind === "night" ? state.cinematic.attackedId : undefined;
+  const index = state.players.findIndex((player) => player.id === attackedId);
   const target = homePosition(Math.max(0, index), state.players.length);
-  const scale = 0.1 + THREE.MathUtils.smoothstep(progress, 0.04, 0.2) * 1.5;
+  useFrame(() => {
+    if (!shield.current) return;
+    const arrive = THREE.MathUtils.smoothstep(progress.current, 0.04, 0.2);
+    const pulse = 1 + Math.sin(progress.current * Math.PI * 14) * 0.035;
+    shield.current.scale.setScalar((0.08 + arrive * 1.52) * pulse);
+  });
+  if (!active) return null;
   return (
     <group position={target}>
-      <mesh position-y={1} scale={scale}>
-        <sphereGeometry args={[1, 24, 16]} />
-        <meshStandardMaterial
-          color="#82e7ca"
-          emissive="#41dcb0"
-          emissiveIntensity={2.6}
-          transparent
-          opacity={0.22}
-          side={THREE.DoubleSide}
+      <group ref={shield} position-y={1}>
+        <mesh>
+          <sphereGeometry args={[1, 24, 16]} />
+          <meshStandardMaterial
+            color="#82e7ca"
+            emissive="#41dcb0"
+            emissiveIntensity={2.6}
+            transparent
+            opacity={0.22}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+        <Sparkles
+          count={28}
+          scale={[1.7, 1.9, 1.7]}
+          size={5}
+          speed={1.2}
+          color="#a8ffe7"
+          opacity={0.9}
         />
-      </mesh>
-      <Sparkles
-        count={28}
-        scale={[2.5, 2.8, 2.5]}
-        size={5}
-        speed={1.2}
-        color="#a8ffe7"
-        opacity={0.9}
-      />
+      </group>
     </group>
   );
 }
@@ -526,25 +592,31 @@ function VoteSpotlight({
   progress,
 }: {
   state: PalermoState;
-  progress: number;
+  progress: ProgressRef;
 }) {
-  if (
-    state.phase !== "vote-result" ||
-    state.cinematic?.kind !== "vote" ||
-    !state.cinematic.eliminatedId
-  )
-    return null;
-  const cinematic = state.cinematic;
-  const index = state.players.findIndex(
-    (player) => player.id === cinematic.eliminatedId,
-  );
+  const spotlight = useRef<THREE.SpotLight>(null);
+  const active =
+    state.phase === "vote-result" &&
+    state.cinematic?.kind === "vote" &&
+    Boolean(state.cinematic.eliminatedId);
+  const eliminatedId =
+    state.cinematic?.kind === "vote" ? state.cinematic.eliminatedId : undefined;
+  const index = state.players.findIndex((player) => player.id === eliminatedId);
   const target = playerPosition(Math.max(0, index), state.players.length);
+  useFrame(() => {
+    if (!spotlight.current) return;
+    spotlight.current.intensity =
+      THREE.MathUtils.smoothstep(progress.current, 0.03, 0.12) * 90;
+    spotlight.current.target.position.set(target[0], 0, target[2]);
+    spotlight.current.target.updateMatrixWorld();
+  });
+  if (!active) return null;
   return (
     <spotLight
+      ref={spotlight}
       position={[target[0], 7, target[2] + 1]}
-      target-position={target}
       color="#ffb365"
-      intensity={progress > 0.05 ? 90 : 0}
+      intensity={0}
       angle={0.25}
       penumbra={0.75}
       castShadow
@@ -557,17 +629,22 @@ function VotePortal({
   progress,
 }: {
   state: PalermoState;
-  progress: number;
+  progress: ProgressRef;
 }) {
-  if (
-    state.phase !== "vote-result" ||
-    state.cinematic?.kind !== "vote" ||
-    !state.cinematic.eliminatedId
-  )
-    return null;
-  const reveal = THREE.MathUtils.smoothstep(progress, 0.04, 0.15);
+  const portal = useRef<THREE.Group>(null);
+  const active =
+    state.phase === "vote-result" &&
+    state.cinematic?.kind === "vote" &&
+    Boolean(state.cinematic.eliminatedId);
+  useFrame(() => {
+    if (!portal.current) return;
+    const reveal = THREE.MathUtils.smoothstep(progress.current, 0.04, 0.15);
+    portal.current.scale.setScalar(reveal);
+    portal.current.rotation.y = progress.current * Math.PI * 0.8;
+  });
+  if (!active) return null;
   return (
-    <group position={[0, 6.1, 0]} scale={reveal}>
+    <group ref={portal} position={[0, 6.1, 0]} scale={0.01}>
       <mesh rotation-x={Math.PI / 2}>
         <torusGeometry args={[1.45, 0.18, 12, 48]} />
         <meshStandardMaterial
@@ -590,17 +667,8 @@ function VotePortal({
 
 function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
   const { camera, scene } = useThree();
-  const [progress, setProgress] = useState(0);
+  const progress = useRef(0);
   const duration = Math.max(1, PHASE_LENGTHS[state.phase] * 1000);
-  useEffect(() => {
-    const update = () =>
-      setProgress(
-        THREE.MathUtils.clamp(1 - (state.endsAt - Date.now()) / duration, 0, 1),
-      );
-    update();
-    const timer = window.setInterval(update, 80);
-    return () => window.clearInterval(timer);
-  }, [duration, state.endsAt, state.phase]);
   const isNight =
     state.phase === "night" ||
     state.phase === "night-result" ||
@@ -612,6 +680,11 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
     );
   }, [isNight, scene]);
   useFrame((_, delta) => {
+    progress.current = THREE.MathUtils.clamp(
+      1 - (state.endsAt - Date.now()) / duration,
+      0,
+      1,
+    );
     const cinematic =
       state.phase === "night-result" || state.phase === "vote-result";
     const drift = Math.sin(performance.now() * 0.00012) * 0.09;
