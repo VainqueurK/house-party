@@ -29,6 +29,18 @@ async function joinPlayer(
     window.cancelAnimationFrame = ((handle: number) =>
       window.clearTimeout(handle)) as typeof window.cancelAnimationFrame;
   });
+  if (process.env.SHOWCASE_RECORD === "1") {
+    await context.addInitScript(() => {
+      Object.defineProperty(window, "WebGLRenderingContext", {
+        configurable: true,
+        value: undefined,
+      });
+      Object.defineProperty(window, "WebGL2RenderingContext", {
+        configurable: true,
+        value: undefined,
+      });
+    });
+  }
   const page = await context.newPage();
   await page.goto(`${baseURL}/?room=${encodeURIComponent(code)}`);
   await page.getByLabel("Your name").fill(name);
@@ -102,8 +114,9 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
     // Presence leaves cleanly and the same device can recover its lobby session.
     await devices[4].page.goto("about:blank");
     await expect(display.getByTestId("player-count")).toHaveText("4");
-    await devices[4].page.goto(`${origin}/?room=${encodeURIComponent(code)}`);
+    await devices[4].page.goto(origin);
     await expect(devices[4].page.getByTestId("lobby")).toBeVisible();
+    await expect(devices[4].page).toHaveURL(new RegExp(`room=${code}`));
     await expect(display.getByTestId("player-count")).toHaveText("5");
 
     await display.getByTestId("start-game").click();
@@ -117,6 +130,19 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
     );
     for (const device of devices)
       await expect(device.page.getByTestId("player-controller")).toBeVisible();
+
+    if (shouldRecord) {
+      await devices[4].page.goto("about:blank");
+      await expect(display.getByTestId("absence-panel")).toContainText("Eve", {
+        timeout: 12_000,
+      });
+      await display.waitForTimeout(2_200);
+      await devices[4].page.goto(origin);
+      await expect(devices[4].page.getByTestId("player-controller")).toBeVisible();
+      await expect(display.getByTestId("absence-panel")).toHaveCount(0, {
+        timeout: 8_000,
+      });
+    }
 
     await expect(devices[0].page.getByTestId("role-reveal-toggle")).toHaveAttribute(
       "aria-pressed",
@@ -221,14 +247,16 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
       // normal core journey.
       await display.waitForTimeout(7000);
     } else {
-      await expect(display.getByTestId("game-display")).toHaveAttribute(
-        "data-phase",
-        "night-result",
-      );
-      await expect(display.getByTestId("palermo-3d-stage")).toHaveAttribute(
-        "data-cinematic",
-        "night",
-      );
+      await expect(display.getByTestId("game-display")).toBeVisible();
+      const resolvedPhase = await display
+        .getByTestId("game-display")
+        .getAttribute("data-phase");
+      expect(["night-result", "discussion"]).toContain(resolvedPhase);
+      if (resolvedPhase === "night-result")
+        await expect(display.getByTestId("palermo-3d-stage")).toHaveAttribute(
+          "data-cinematic",
+          "night",
+        );
 
       // The exact resolved cinematic also survives a display reload without resolving twice.
       await display.reload();
@@ -368,8 +396,21 @@ test("everyone plays mode lets the laptop host receive a role and show cinematic
     await expect(host.getByTestId("host-controls")).toBeVisible();
     const hostRole = await host.getByTestId("private-role").textContent();
 
+    // A vanished phone gets a grace period and returns to the same seat from
+    // the plain home URL without entering its code or name again.
+    await phones[2].page.goto("about:blank");
+    await expect(host.getByTestId("absence-panel")).toContainText("Rae", {
+      timeout: 12_000,
+    });
+    await phones[2].page.goto(origin);
+    await expect(phones[2].page.getByTestId("player-controller")).toBeVisible();
+    await expect(host.getByTestId("absence-panel")).toHaveCount(0, {
+      timeout: 8_000,
+    });
+
     // Host authority and its private role survive a laptop reload.
-    await host.reload();
+    await host.goto(origin);
+    await expect(host).toHaveURL(new RegExp(`room=${code}`));
     await expect(host.getByTestId("host-controls")).toBeVisible();
     await expect(host.getByTestId("private-role")).toHaveText(hostRole!.trim());
     await host

@@ -30,7 +30,13 @@ import { useNarrator } from "./lib/use-narrator";
 import { playGameSound, unlockGameAudio } from "./lib/game-audio";
 import {
   assignRoles,
+  isActivePlayer,
+  PLAYER_ABSENCE_GRACE_MS,
   PHASE_LENGTHS,
+  phaseDurationFor,
+  pluralityTarget,
+  resolvePlayerDeparture,
+  ROOM_MAX_AGE_MS,
   resolveNight,
   resolveVote,
   winnerFor,
@@ -79,6 +85,22 @@ function narrationFor(state: PalermoState) {
   return state.resultText ?? "Palermo has spoken.";
 }
 
+function roleIntelFor(
+  targetId: string,
+  assignedRoles: PalermoRoles,
+  roster: PalermoState["players"],
+) {
+  if (assignedRoles[targetId] !== "mafia") return [];
+  return roster
+    .filter(
+      (player) =>
+        player.id !== targetId &&
+        isActivePlayer(player) &&
+        assignedRoles[player.id] === "mafia",
+    )
+    .map((player) => player.name);
+}
+
 export default function Home() {
   const [view, setView] = useState<"home" | "join" | "lobby" | "game">("home");
   const [name, setName] = useState("");
@@ -95,6 +117,7 @@ export default function Home() {
   const narrator = useNarrator();
   const narratedRevision = useRef(0);
   const advancedRevision = useRef<number | null>(null);
+  const absenceTimers = useRef<Record<string, number>>({});
 
   useEffect(() => {
     const narrationSetting = localStorage.getItem(
@@ -117,51 +140,63 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const roomFromLink = new URLSearchParams(window.location.search).get(
-      "room",
-    );
-    if (roomFromLink) {
-      setCode(roomFromLink.toUpperCase());
-      const saved = localStorage.getItem("house-party:session");
-      if (saved) {
-        try {
-          const session = JSON.parse(saved) as {
-            code: string;
-            name: string;
-            mode: RoomMode;
-            view: "lobby" | "game";
-          };
-          if (
-            session.code === roomFromLink.toUpperCase() &&
-            (session.mode !== "display" ||
-              new URLSearchParams(window.location.search).get("display") ===
-                "1")
-          ) {
-            setName(session.name);
-            setMode(session.mode);
-            setView(session.view);
-            if (session.mode !== "player") {
-              const state = localStorage.getItem(
-                `house-party:display-state:${session.code}`,
-              );
-              const savedRoles = localStorage.getItem(
-                `house-party:display-roles:${session.code}`,
-              );
-              if (state) {
-                const restored = JSON.parse(state) as PalermoState;
-                setDisplayState({
-                  ...restored,
-                  revision: restored.revision ?? 1,
-                });
+    const params = new URLSearchParams(window.location.search);
+    const roomFromLink = params.get("room")?.toUpperCase();
+    const saved = localStorage.getItem("house-party:session");
+    if (saved) {
+      try {
+        const session = JSON.parse(saved) as {
+          code: string;
+          name: string;
+          mode: RoomMode;
+          view: "lobby" | "game";
+          updatedAt?: number;
+        };
+        const fresh =
+          !session.updatedAt || Date.now() - session.updatedAt <= ROOM_MAX_AGE_MS;
+        const matchesLink = !roomFromLink || session.code === roomFromLink;
+        const displayAllowed =
+          session.mode !== "display" || !roomFromLink || params.get("display") === "1";
+        if (fresh && matchesLink && displayAllowed) {
+          setCode(session.code);
+          setName(session.name);
+          setMode(session.mode);
+          setView(session.view);
+          if (!roomFromLink)
+            history.replaceState(
+              {},
+              "",
+              `/?room=${session.code}${session.mode === "display" ? "&display=1" : ""}`,
+            );
+          if (session.mode !== "player") {
+            const state = localStorage.getItem(`house-party:display-state:${session.code}`);
+            const savedRoles = localStorage.getItem(`house-party:display-roles:${session.code}`);
+            if (state) {
+              const restored = JSON.parse(state) as PalermoState;
+              if (!restored.lastActivityAt || Date.now() - restored.lastActivityAt <= ROOM_MAX_AGE_MS)
+                setDisplayState({ ...restored, revision: restored.revision ?? 1 });
+              else {
+                localStorage.removeItem(`house-party:display-state:${session.code}`);
+                localStorage.removeItem(`house-party:display-roles:${session.code}`);
               }
-              if (savedRoles) setRoles(JSON.parse(savedRoles) as PalermoRoles);
             }
-            return;
+            if (savedRoles) setRoles(JSON.parse(savedRoles) as PalermoRoles);
           }
-        } catch {
-          localStorage.removeItem("house-party:session");
+          return;
         }
+        if (!fresh) {
+          localStorage.removeItem("house-party:session");
+          for (const kind of ["state", "role", "role-intel", "action", "investigation"])
+            localStorage.removeItem(`house-party:${kind}:${session.code}`);
+          localStorage.removeItem(`house-party:display-state:${session.code}`);
+          localStorage.removeItem(`house-party:display-roles:${session.code}`);
+        }
+      } catch {
+        localStorage.removeItem("house-party:session");
       }
+    }
+    if (roomFromLink) {
+      setCode(roomFromLink);
       setView("join");
     }
   }, []);
@@ -184,7 +219,7 @@ export default function Home() {
     if (view !== "lobby" && view !== "game") return;
     localStorage.setItem(
       "house-party:session",
-      JSON.stringify({ code, name, mode, view }),
+      JSON.stringify({ code, name, mode, view, updatedAt: Date.now() }),
     );
   }, [code, mode, name, view]);
 
@@ -201,11 +236,36 @@ export default function Home() {
   }, [code, displayState, isHost, roles]);
 
   useEffect(() => {
+    if (!isHost || !displayState?.lastActivityAt) return;
+    const remaining = Math.max(
+      0,
+      ROOM_MAX_AGE_MS - (Date.now() - displayState.lastActivityAt),
+    );
+    const timer = window.setTimeout(() => {
+      void sync.closeRoom();
+      sync.clearLocalRoom();
+      localStorage.removeItem("house-party:session");
+      localStorage.removeItem(`house-party:display-state:${code}`);
+      localStorage.removeItem(`house-party:display-roles:${code}`);
+      history.replaceState({}, "", "/");
+      setDisplayState(null);
+      setRoles({});
+      setView("home");
+    }, remaining);
+    return () => window.clearTimeout(timer);
+  }, [code, displayState?.lastActivityAt, isHost, sync]);
+
+  useEffect(() => {
     if (!isHost || !sync.syncRequests.length) return;
     const requesterIds = [...new Set(sync.syncRequests)];
     requesterIds.forEach((id) => {
       if (displayState) void sync.sendGameState(displayState);
-      if (roles[id]) void sync.sendPrivateRole(id, roles[id]);
+      if (roles[id])
+        void sync.sendPrivateRole(
+          id,
+          roles[id],
+          roleIntelFor(id, roles, displayState?.players ?? []),
+        );
     });
     sync.clearSyncRequests();
   }, [displayState, isHost, roles, sync]);
@@ -215,7 +275,12 @@ export default function Home() {
     const resendRoles = () => {
       for (const player of displayState.players) {
         const role = roles[player.id];
-        if (role) void sendPrivateRole(player.id, role);
+        if (role)
+          void sendPrivateRole(
+            player.id,
+            role,
+            roleIntelFor(player.id, roles, displayState.players),
+          );
       }
     };
     const timer = window.setInterval(resendRoles, 1800);
@@ -238,16 +303,75 @@ export default function Home() {
   );
 
   const players: (Avatar | RoomPlayer)[] =
-    sync.enabled && sync.players.length > 0
+    sync.enabled
       ? sync.players.map((player) => ({
           ...player,
           status: player.name === name ? "You" : player.status,
         }))
-      : mode === "display"
-        ? []
-        : demoPlayers;
+      : demoPlayers;
 
   const gameState = isHost ? displayState : sync.gameState;
+  const onlinePlayers = sync.players;
+  const sendSyncedGameState = sync.sendGameState;
+
+  useEffect(
+    () => () => {
+      for (const timer of Object.values(absenceTimers.current))
+        window.clearTimeout(timer);
+      absenceTimers.current = {};
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isHost || !displayState || displayState.phase === "won") return;
+    const online = new Set(onlinePlayers.map((player) => player.id));
+    const reconnected = displayState.players.some(
+      (player) => player.disconnectedAt && online.has(player.id),
+    );
+    if (reconnected) {
+      const next = {
+        ...displayState,
+        revision: displayState.revision + 1,
+        lastActivityAt: Date.now(),
+        players: displayState.players.map((player) =>
+          online.has(player.id) ? { ...player, disconnectedAt: undefined } : player,
+        ),
+        notice: { id: crypto.randomUUID(), message: "A player reconnected. The game is ready again." },
+      };
+      setDisplayState(next);
+      void sendSyncedGameState(next);
+      return;
+    }
+    for (const player of displayState.players.filter(isActivePlayer)) {
+      if (online.has(player.id) || player.disconnectedAt || absenceTimers.current[player.id]) continue;
+      absenceTimers.current[player.id] = window.setTimeout(() => {
+        delete absenceTimers.current[player.id];
+        setDisplayState((current) => {
+          if (!current || current.phase === "won" || onlinePlayers.some((item) => item.id === player.id)) return current;
+          const next = {
+            ...current,
+            revision: current.revision + 1,
+            lastActivityAt: Date.now(),
+            players: current.players.map((item) =>
+              item.id === player.id && isActivePlayer(item)
+                ? { ...item, disconnectedAt: Date.now() }
+                : item,
+            ),
+            notice: { id: crypto.randomUUID(), message: `${player.name} lost connection. Their place is being held.` },
+          };
+          void sendSyncedGameState(next);
+          return next;
+        });
+      }, 6_000);
+    }
+    for (const [id, timer] of Object.entries(absenceTimers.current)) {
+      if (online.has(id)) {
+        window.clearTimeout(timer);
+        delete absenceTimers.current[id];
+      }
+    }
+  }, [displayState, isHost, onlinePlayers, sendSyncedGameState]);
 
   useEffect(() => {
     if (
@@ -265,7 +389,7 @@ export default function Home() {
         ? Math.max(
             0,
             displayState.endsAt -
-              PHASE_LENGTHS[displayState.phase] * 520 -
+              (displayState.phaseDuration ?? PHASE_LENGTHS[displayState.phase]) * 520 -
               Date.now(),
           )
         : 0;
@@ -295,6 +419,12 @@ export default function Home() {
   useEffect(() => {
     if (!isHost || !displayState || displayState.phase === "won")
       return;
+    if (
+      displayState.players.some(
+        (player) => isActivePlayer(player) && player.disconnectedAt,
+      )
+    )
+      return;
     const phaseActions = sync.actions.filter(
       (action) =>
         action.round === displayState.round &&
@@ -304,10 +434,10 @@ export default function Home() {
     const expected =
       displayState.phase === "night"
         ? displayState.players.filter(
-            (player) => player.alive && roles[player.id] !== "villager",
+            (player) => isActivePlayer(player) && roles[player.id] !== "villager",
           ).length
         : displayState.phase === "voting"
-          ? displayState.players.filter((player) => player.alive).length
+          ? displayState.players.filter(isActivePlayer).length
           : 0;
     // On unreliable networks, never auto-resolve a choice phase while a
     // controller may still be reconnecting. The host can continue manually
@@ -321,8 +451,80 @@ export default function Home() {
   }, [displayState, isHost, roles, sync.actions]);
 
   function publishGameState(next: PalermoState) {
-    setDisplayState(next);
-    void sync.sendGameState(next);
+    const lifecycleState = {
+      ...next,
+      createdAt: next.createdAt ?? displayState?.createdAt ?? Date.now(),
+      lastActivityAt: Date.now(),
+    };
+    setDisplayState(lifecycleState);
+    void sync.sendGameState(lifecycleState);
+  }
+
+  function resolveAbsentPlayer(playerId: string) {
+    if (!displayState || !isHost) return;
+    const result = resolvePlayerDeparture(displayState.players, roles, playerId);
+    setRoles(result.roles);
+    sync.removePlayerActions(playerId);
+    if (result.reassignedPlayerId) {
+      for (const player of result.players.filter(isActivePlayer)) {
+        if (
+          player.id === result.reassignedPlayerId ||
+          result.roles[player.id] === "mafia"
+        )
+          void sync.sendPrivateRole(
+            player.id,
+            result.roles[player.id],
+            roleIntelFor(player.id, result.roles, result.players),
+          );
+      }
+    }
+    const activeCount = result.players.filter(isActivePlayer).length;
+    const forcedEnd = activeCount < 3;
+    publishGameState({
+      ...displayState,
+      revision: displayState.revision + 1,
+      players: result.players,
+      winner: forcedEnd ? undefined : result.winner,
+      phase: forcedEnd || result.winner ? "won" : displayState.phase,
+      endsAt: forcedEnd || result.winner ? 0 : Math.max(displayState.endsAt, Date.now() + 20_000),
+      endedReason: forcedEnd ? "not-enough-players" : undefined,
+      notice: {
+        id: crypto.randomUUID(),
+        message: result.reassignedPlayerId
+          ? "The missing seat was removed and a key role was reassigned privately."
+          : "The missing seat was removed. Palermo has rebalanced the round.",
+      },
+      resultText: forcedEnd
+        ? "Not enough active players remain, so this game has ended safely."
+        : result.winner
+          ? `${result.winner === "town" ? "The town" : "The mafia"} wins after a player departure.`
+          : displayState.resultText,
+    });
+  }
+
+  function keepWaitingForPlayer(playerId: string) {
+    if (!displayState || !isHost) return;
+    publishGameState({
+      ...displayState,
+      revision: displayState.revision + 1,
+      players: displayState.players.map((player) =>
+        player.id === playerId ? { ...player, disconnectedAt: Date.now() } : player,
+      ),
+      notice: { id: crypto.randomUUID(), message: "The host is holding this seat for another 90 seconds." },
+    });
+  }
+
+  function endInterruptedGame() {
+    if (!displayState || !isHost) return;
+    publishGameState({
+      ...displayState,
+      revision: displayState.revision + 1,
+      phase: "won",
+      endsAt: 0,
+      winner: undefined,
+      endedReason: "host-ended",
+      resultText: "The host ended this interrupted game. No side wins.",
+    });
   }
 
   function newRoomCode() {
@@ -369,6 +571,7 @@ export default function Home() {
   function leaveRoom() {
     const finishLeaving = () => {
       localStorage.removeItem("house-party:session");
+      sync.clearLocalRoom();
       if (isHost) {
         localStorage.removeItem(`house-party:display-state:${code}`);
         localStorage.removeItem(`house-party:display-roles:${code}`);
@@ -393,40 +596,51 @@ export default function Home() {
       color: player.color,
       alive: true,
     }));
-    if (roster.length < 4) return;
+    if (roster.length < 4 || roster.length > 20) return;
     const assigned = assignRoles(roster);
     setRoles(assigned);
     await Promise.all(
       roster.map((player) =>
-        sync.sendPrivateRole(player.id, assigned[player.id]),
+        sync.sendPrivateRole(
+          player.id,
+          assigned[player.id],
+          roleIntelFor(player.id, assigned, roster),
+        ),
       ),
     );
     if (narrationEnabled) void narrator.prepare();
+    const roleRevealDuration = phaseDurationFor("role-reveal", roster.length);
     publishGameState({
       revision: 1,
       phase: "role-reveal",
       round: 1,
-      endsAt: Date.now() + PHASE_LENGTHS["role-reveal"] * 1000,
+      endsAt: Date.now() + roleRevealDuration * 1000,
+      phaseDuration: roleRevealDuration,
       players: roster,
       screenMode: mode === "host-player" ? "everyone" : "shared",
+      createdAt: Date.now(),
+      lastActivityAt: Date.now(),
     });
     setView("game");
   }
 
   function latestActions(): PalermoActions {
-    return sync.actions
+    const actions = sync.actions
       .filter(
         (action) =>
           action.round === displayState?.round &&
           action.phase === displayState?.phase,
       )
-      .reduce<PalermoActions>((result, action) => {
-        if (action.kind === "mafia") result.mafiaTarget = action.targetId;
+    const mafiaTargets = actions
+      .filter((action) => action.kind === "mafia")
+      .map((action) => action.targetId);
+    const mafiaTarget = pluralityTarget(mafiaTargets);
+    return actions.reduce<PalermoActions>((result, action) => {
         if (action.kind === "doctor") result.doctorTarget = action.targetId;
         if (action.kind === "detective")
           result.detectiveTarget = action.targetId;
         return result;
-      }, {});
+      }, { mafiaTarget });
   }
 
   function advanceGame() {
@@ -436,11 +650,13 @@ export default function Home() {
     const now = Date.now();
     if (displayState.phase === "role-reveal") {
       sync.clearActions();
+      const duration = phaseDurationFor("night", displayState.players.length);
       publishGameState({
         ...displayState,
         revision: displayState.revision + 1,
         phase: "night",
-        endsAt: now + PHASE_LENGTHS.night * 1000,
+        endsAt: now + duration * 1000,
+        phaseDuration: duration,
       });
     } else if (displayState.phase === "night") {
       const detectiveAction = sync.actions.find(
@@ -468,11 +684,13 @@ export default function Home() {
         : undefined;
       const winner = winnerFor(resolved.players, roles);
       sync.clearActions();
+      const duration = phaseDurationFor("night-result", displayState.players.length);
       publishGameState({
         ...displayState,
         revision: displayState.revision + 1,
         phase: "night-result",
-        endsAt: now + PHASE_LENGTHS["night-result"] * 1000,
+        endsAt: now + duration * 1000,
+        phaseDuration: duration,
         players: resolved.players,
         winner,
         cinematic: {
@@ -493,11 +711,13 @@ export default function Home() {
             : "The night passed without a victim.",
       });
     } else if (displayState.phase === "night-result") {
+      const duration = phaseDurationFor("discussion", displayState.players.length);
       publishGameState({
         ...displayState,
         revision: displayState.revision + 1,
         phase: displayState.winner ? "won" : "discussion",
-        endsAt: displayState.winner ? 0 : now + PHASE_LENGTHS.discussion * 1000,
+        endsAt: displayState.winner ? 0 : now + duration * 1000,
+        phaseDuration: displayState.winner ? 0 : duration,
         resultText: displayState.winner
           ? `${displayState.winner === "town" ? "The town" : "The mafia"} wins.`
           : displayState.resultText,
@@ -505,11 +725,13 @@ export default function Home() {
       });
     } else if (displayState.phase === "discussion") {
       sync.clearActions();
+      const duration = phaseDurationFor("voting", displayState.players.length);
       publishGameState({
         ...displayState,
         revision: displayState.revision + 1,
         phase: "voting",
-        endsAt: now + PHASE_LENGTHS.voting * 1000,
+        endsAt: now + duration * 1000,
+        phaseDuration: duration,
         resultText: "Choose carefully. Your vote stays private.",
       });
     } else if (displayState.phase === "voting") {
@@ -526,11 +748,13 @@ export default function Home() {
           )?.name
         : undefined;
       sync.clearActions();
+      const duration = phaseDurationFor("vote-result", displayState.players.length);
       publishGameState({
         ...displayState,
         revision: displayState.revision + 1,
         phase: "vote-result",
-        endsAt: now + PHASE_LENGTHS["vote-result"] * 1000,
+        endsAt: now + duration * 1000,
+        phaseDuration: duration,
         players: resolved.players,
         winner,
         eliminatedId: resolved.eliminatedId,
@@ -545,6 +769,7 @@ export default function Home() {
           : "The vote was tied. Nobody leaves.",
       });
     } else if (displayState.phase === "vote-result") {
+      const duration = phaseDurationFor("night", displayState.players.length);
       publishGameState({
         ...displayState,
         revision: displayState.revision + 1,
@@ -552,7 +777,8 @@ export default function Home() {
         round: displayState.winner
           ? displayState.round
           : displayState.round + 1,
-        endsAt: displayState.winner ? 0 : now + PHASE_LENGTHS.night * 1000,
+        endsAt: displayState.winner ? 0 : now + duration * 1000,
+        phaseDuration: displayState.winner ? 0 : duration,
         resultText: displayState.winner
           ? `${displayState.winner === "town" ? "The town" : "The mafia"} wins.`
           : undefined,
@@ -585,10 +811,10 @@ export default function Home() {
   const requiredActionCount =
     displayState?.phase === "night"
       ? displayState.players.filter(
-          (player) => player.alive && roles[player.id] !== "villager",
+          (player) => isActivePlayer(player) && roles[player.id] !== "villager",
         ).length
       : displayState?.phase === "voting"
-        ? displayState.players.filter((player) => player.alive).length
+        ? displayState.players.filter(isActivePlayer).length
         : 0;
 
   return (
@@ -800,12 +1026,16 @@ export default function Home() {
             onToggleGraphicsQuality={toggleGraphicsQuality}
             onSpeak={speak}
             onAdvance={advancePhase}
+            onResolveAbsent={resolveAbsentPlayer}
+            onKeepWaiting={keepWaitingForPlayer}
+            onEndInterrupted={endInterruptedGame}
           />
         ) : (
           <PlayerController
             state={gameState}
             playerId={sync.playerId}
             role={sync.myRole}
+            roleIntel={sync.roleIntel}
             investigationResult={sync.investigationResult}
             onAction={sync.sendAction}
             hosting={mode === "host-player"}
@@ -814,6 +1044,10 @@ export default function Home() {
             onAdvance={advancePhase}
             onSpeak={speak}
             connected={sync.connected}
+            hostConnected={sync.hostConnected}
+            onResolveAbsent={resolveAbsentPlayer}
+            onKeepWaiting={keepWaitingForPlayer}
+            onEndInterrupted={endInterruptedGame}
           />
         ))}
     </main>
@@ -1098,7 +1332,7 @@ function Lobby({
               data-testid="start-game"
               className="primary-button full"
               onClick={onStart}
-              disabled={players.length < 4}
+              disabled={players.length < 4 || players.length > 20}
             >
               <Play size={16} fill="currentColor" /> Start the game
             </button>
@@ -1108,7 +1342,9 @@ function Lobby({
             </div>
           )}
           <small className="min-players">
-            {players.length < 4
+            {players.length > 20
+              ? `${players.length - 20} player${players.length - 20 === 1 ? "" : "s"} must leave—Palermo supports up to 20.`
+              : players.length < 4
               ? `Need ${4 - players.length} more players to start`
               : hostMode
                 ? "Everyone's in. Let’s make some questionable choices."
@@ -1157,6 +1393,7 @@ function PlayerController({
   state,
   playerId,
   role,
+  roleIntel,
   investigationResult,
   onAction,
   hosting,
@@ -1165,10 +1402,15 @@ function PlayerController({
   onAdvance,
   onSpeak,
   connected,
+  hostConnected,
+  onResolveAbsent,
+  onKeepWaiting,
+  onEndInterrupted,
 }: {
   state: PalermoState;
   playerId: string;
   role: import("./lib/palermo").PalermoRole | null;
+  roleIntel: string[];
   investigationResult: import("./lib/use-room-sync").InvestigationResult | null;
   onAction: (action: import("./lib/use-room-sync").GameAction) => Promise<void>;
   hosting: boolean;
@@ -1177,6 +1419,10 @@ function PlayerController({
   onAdvance: () => void;
   onSpeak: () => void;
   connected: boolean;
+  hostConnected: boolean;
+  onResolveAbsent: (playerId: string) => void;
+  onKeepWaiting: (playerId: string) => void;
+  onEndInterrupted: () => void;
 }) {
   const [selected, setSelected] = useState("");
   const [roleRevealed, setRoleRevealed] = useState(false);
@@ -1207,16 +1453,22 @@ function PlayerController({
         navigator.vibrate?.(
           protectedAttack ? [30, 45, 30] : [70, 35, 110],
         );
-      }, Math.max(0, state.endsAt - PHASE_LENGTHS["night-result"] * 580 - Date.now()));
+      }, Math.max(0, state.endsAt - (state.phaseDuration ?? PHASE_LENGTHS["night-result"]) * 580 - Date.now()));
     else if (state.phase === "vote-result")
       delayedFeedback = window.setTimeout(() => {
         playGameSound("vote");
         navigator.vibrate?.([45, 35, 45]);
-      }, Math.max(0, state.endsAt - PHASE_LENGTHS["vote-result"] * 580 - Date.now()));
+      }, Math.max(0, state.endsAt - (state.phaseDuration ?? PHASE_LENGTHS["vote-result"]) * 580 - Date.now()));
     return () => {
       if (delayedFeedback) window.clearTimeout(delayedFeedback);
     };
-  }, [state.cinematic, state.endsAt, state.phase, state.revision]);
+  }, [
+    state.cinematic,
+    state.endsAt,
+    state.phase,
+    state.phaseDuration,
+    state.revision,
+  ]);
   useEffect(() => {
     setSeconds(Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000)));
     const timer = window.setInterval(
@@ -1233,6 +1485,12 @@ function PlayerController({
   );
   const isAlive =
     state.players.find((player) => player.id === playerId)?.alive ?? false;
+  const hasDeparted = Boolean(
+    state.players.find((player) => player.id === playerId)?.departedAt,
+  );
+  const gamePausedForReconnect = state.players.some(
+    (player) => isActivePlayer(player) && player.disconnectedAt,
+  );
   const canAct =
     isAlive && (state.phase === "night" || state.phase === "voting");
   const noSharedScreen = hosting || state.screenMode === "everyone";
@@ -1322,7 +1580,29 @@ function PlayerController({
             when the connection returns.
           </div>
         )}
-        {state.phase === "role-reveal" ? (
+        {connected && !hosting && !hostConnected && (
+          <div className="recovery-banner host-offline" role="status">
+            The game host is offline. Keep this tab open—the same host device can restore the room automatically.
+          </div>
+        )}
+        {state.notice && (
+          <div className="game-notice" role="status">{state.notice.message}</div>
+        )}
+        {hosting && (
+          <AbsentPlayersPanel
+            state={state}
+            onResolve={onResolveAbsent}
+            onKeepWaiting={onKeepWaiting}
+            onEnd={onEndInterrupted}
+          />
+        )}
+        {hasDeparted ? (
+          <div className="departed-card">
+            <span>YOUR SEAT HAS CLOSED</span>
+            <h1>Watch this round.</h1>
+            <p>Your controller reconnected after the host reconfigured the game. You can join the next room normally.</p>
+          </div>
+        ) : state.phase === "role-reveal" ? (
           <button
             type="button"
             className={`role-card-game ${roleRevealed ? "revealed" : "concealed"} role-${role ?? "pending"}`}
@@ -1345,6 +1625,9 @@ function PlayerController({
                   ? roleCopy[role]
                   : "Your role is still being dealt."}
               </span>
+              {role === "mafia" && roleIntel.length > 0 && (
+                <span className="role-intel">Your crew: {roleIntel.join(", ")}</span>
+              )}
             </span>
             <span className="role-card-reveal">
               {roleRevealed ? <EyeOff size={20} /> : <Eye size={20} />}
@@ -1353,7 +1636,13 @@ function PlayerController({
           </button>
         ) : state.phase === "won" ? (
           <>
-            <h1>{state.winner === "town" ? "Town wins." : "Mafia wins."}</h1>
+            <h1>
+              {!state.winner
+                ? "Game ended safely."
+                : state.winner === "town"
+                  ? "Town wins."
+                  : "Mafia wins."}
+            </h1>
             <p>{state.resultText}</p>
           </>
         ) : (
@@ -1445,6 +1734,9 @@ function PlayerController({
                 <small>{roleRevealed ? "TAP TO CONCEAL" : "TAP TO PEEK"}</small>
                 <strong data-testid="private-role">{roleLabel}</strong>
                 {roleRevealed && role && <span>{roleCopy[role]}</span>}
+                {roleRevealed && role === "mafia" && roleIntel.length > 0 && (
+                  <span className="role-intel">Your crew: {roleIntel.join(", ")}</span>
+                )}
               </span>
             </button>
             {state.phase === "night" && role === "villager" && (
@@ -1473,12 +1765,17 @@ function PlayerController({
               className="primary-button"
               onClick={onAdvance}
               disabled={
-                requiredActionCount > 0 &&
-                actionCount < requiredActionCount &&
-                seconds > 0
+                gamePausedForReconnect ||
+                (requiredActionCount > 0 &&
+                  actionCount < requiredActionCount &&
+                  seconds > 0)
               }
             >
-              {seconds > 0 ? "Skip timer" : "Continue"}
+              {gamePausedForReconnect
+                ? "Game paused"
+                : seconds > 0
+                  ? "Skip timer"
+                  : "Continue"}
             </button>
           </div>
         )}
@@ -1499,6 +1796,9 @@ function GameBoard({
   onToggleGraphicsQuality,
   onSpeak,
   onAdvance,
+  onResolveAbsent,
+  onKeepWaiting,
+  onEndInterrupted,
 }: {
   state: PalermoState;
   players: (Avatar | RoomPlayer)[];
@@ -1511,6 +1811,9 @@ function GameBoard({
   onToggleGraphicsQuality: () => void;
   onSpeak: () => void;
   onAdvance: () => void;
+  onResolveAbsent: (playerId: string) => void;
+  onKeepWaiting: (playerId: string) => void;
+  onEndInterrupted: () => void;
 }) {
   const [seconds, setSeconds] = useState(
     Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000)),
@@ -1532,7 +1835,9 @@ function GameBoard({
   const narrating = narratorStatus === "speaking";
   const cinematic =
     state.phase === "night-result" || state.phase === "vote-result";
-  const cinematicDuration = cinematic ? PHASE_LENGTHS[state.phase] : 1;
+  const cinematicDuration = cinematic
+    ? state.phaseDuration ?? PHASE_LENGTHS[state.phase]
+    : 1;
   const cinematicProgress = cinematic
     ? Math.max(0, Math.min(1, (cinematicDuration - seconds) / cinematicDuration))
     : 1;
@@ -1540,11 +1845,17 @@ function GameBoard({
   const waitingForActions =
     requiredActionCount > 0 && actionCount < requiredActionCount && seconds > 0;
   const townIsMoving =
-    (state.phase === "night" && seconds > PHASE_LENGTHS.night - 8) ||
-    (state.phase === "discussion" && seconds > PHASE_LENGTHS.discussion - 6);
-  const phaseBlocked = waitingForActions || townIsMoving;
+    (state.phase === "night" && seconds > (state.phaseDuration ?? PHASE_LENGTHS.night) - 8) ||
+    (state.phase === "discussion" && seconds > (state.phaseDuration ?? PHASE_LENGTHS.discussion) - 6);
+  const gamePausedForReconnect = state.players.some(
+    (player) => isActivePlayer(player) && player.disconnectedAt,
+  );
+  const phaseBlocked =
+    waitingForActions || townIsMoving || gamePausedForReconnect;
   const headline = won ? (
-    state.winner === "town" ? (
+    !state.winner ? (
+      "Game ended safely."
+    ) : state.winner === "town" ? (
       "The town wins."
     ) : (
       "The mafia wins."
@@ -1677,6 +1988,12 @@ function GameBoard({
           </button>
         </div>
       </div>
+      <AbsentPlayersPanel
+        state={state}
+        onResolve={onResolveAbsent}
+        onKeepWaiting={onKeepWaiting}
+        onEnd={onEndInterrupted}
+      />
       <div
         className={`game-center cinematic-copy ${cinematic ? "compact" : ""}`}
       >
@@ -1745,7 +2062,7 @@ function GameBoard({
           ))}
         </div>
         <span>
-          {state.players.filter((player) => player.alive).length} alive ·{" "}
+          {state.players.filter(isActivePlayer).length} active ·{" "}
           {state.players.length} players
         </span>
         {!won && (
@@ -1756,7 +2073,9 @@ function GameBoard({
             disabled={phaseBlocked}
             onClick={onAdvance}
           >
-            {waitingForActions
+            {gamePausedForReconnect
+              ? "Game paused for reconnect"
+              : waitingForActions
               ? "Waiting for choices"
               : townIsMoving
                 ? state.phase === "night"
@@ -1772,5 +2091,55 @@ function GameBoard({
         )}
       </div>
     </section>
+  );
+}
+
+function AbsentPlayersPanel({
+  state,
+  onResolve,
+  onKeepWaiting,
+  onEnd,
+}: {
+  state: PalermoState;
+  onResolve: (playerId: string) => void;
+  onKeepWaiting: (playerId: string) => void;
+  onEnd: () => void;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const absent = state.players.filter(
+    (player) => isActivePlayer(player) && player.disconnectedAt,
+  );
+  if (!absent.length || state.phase === "won") return null;
+  return (
+    <aside className="absence-panel" data-testid="absence-panel">
+      <div className="absence-heading">
+        <span>CONNECTION PAUSE</span>
+        <strong>{absent.length} seat{absent.length === 1 ? "" : "s"} offline</strong>
+      </div>
+      {absent.map((player) => {
+        const remaining = Math.max(
+          0,
+          Math.ceil(((player.disconnectedAt ?? now) + PLAYER_ABSENCE_GRACE_MS - now) / 1000),
+        );
+        return (
+          <div className="absence-player" key={player.id}>
+            <span className={`player-avatar small ${player.color}`}>{player.emoji}</span>
+            <div>
+              <strong>{player.name}</strong>
+              <small>{remaining ? `Seat held for ${remaining}s` : "Grace period finished"}</small>
+            </div>
+            <button type="button" onClick={() => onKeepWaiting(player.id)}>Wait 90s</button>
+            <button type="button" className="absence-resolve" data-testid={`resolve-${player.id}`} onClick={() => onResolve(player.id)}>
+              Reconfigure
+            </button>
+          </div>
+        );
+      })}
+      <button type="button" className="absence-end" onClick={onEnd}>End game without a winner</button>
+    </aside>
   );
 }

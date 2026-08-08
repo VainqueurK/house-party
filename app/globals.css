@@ -169,6 +169,112 @@
   }
 }
 
+.game-notice {
+  margin: 0 auto 14px;
+  max-width: 42rem;
+  border: 1px solid rgba(255, 224, 145, 0.32);
+  border-radius: 12px;
+  background: rgba(22, 17, 28, 0.82);
+  color: #ffe091;
+  padding: 10px 14px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.absence-panel {
+  position: absolute;
+  z-index: 24;
+  top: 76px;
+  right: 22px;
+  width: min(390px, calc(100vw - 32px));
+  border: 1px solid rgba(255, 201, 110, 0.35);
+  border-radius: 16px;
+  background: rgba(16, 12, 22, 0.94);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.38);
+  color: #fff8e8;
+  padding: 14px;
+  backdrop-filter: blur(18px);
+}
+
+.controller-card .absence-panel {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  margin-bottom: 14px;
+  text-align: left;
+}
+
+.absence-heading,
+.absence-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.absence-heading {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.absence-heading span,
+.absence-player small {
+  color: rgba(255, 248, 232, 0.62);
+  font-size: 0.67rem;
+  letter-spacing: 0.08em;
+}
+
+.absence-player {
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  padding: 10px 0;
+}
+
+.absence-player > div {
+  display: grid;
+  flex: 1;
+}
+
+.absence-player button,
+.absence-end {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.07);
+  color: inherit;
+  padding: 8px 9px;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.absence-player .absence-resolve {
+  background: #ffe091;
+  color: #201726;
+  font-weight: 800;
+}
+
+.absence-end {
+  width: 100%;
+  color: #ffaaa6;
+}
+
+.departed-card {
+  padding: 22px 4px;
+}
+
+@media (max-width: 640px) {
+  .absence-panel {
+    top: 62px;
+    right: 10px;
+  }
+
+  .absence-player {
+    flex-wrap: wrap;
+  }
+
+  .absence-player > div {
+    min-width: 120px;
+  }
+}
+
 /* Unlayered so reusable table utilities can override DART/Mantine table cells. */
 .table-sticky-last-column th:last-child,
 .table-sticky-last-column td:last-child {
@@ -1968,6 +2074,14 @@ em {
 }
 .resident-label span {
   font-size: 14px;
+}
+.resident-label.crowded {
+  gap: 3px;
+  padding: 3px 5px;
+  font-size: 8px;
+}
+.resident-label.crowded span {
+  font-size: 11px;
 }
 .cinematic-fallback {
   display: grid;

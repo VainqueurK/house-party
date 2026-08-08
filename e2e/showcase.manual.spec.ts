@@ -60,11 +60,16 @@ async function throttleOffCameraRendering(context: BrowserContext) {
   });
 }
 
-async function advance(host: Page) {
-  await host
-    .getByTestId("host-controls")
-    .getByRole("button", { name: /Skip timer|Continue/ })
-    .click();
+async function advance(host: Page, from: string, to: string) {
+  const controller = host.getByTestId("player-controller");
+  const current = await controller.getAttribute("data-phase");
+  if (current === from) {
+    await host
+      .getByTestId("host-controls")
+      .getByRole("button", { name: /Skip timer|Continue/ })
+      .click();
+  }
+  await expect(controller).toHaveAttribute("data-phase", to);
 }
 
 async function choose(page: Page, name: string) {
@@ -128,7 +133,7 @@ test("record a labeled Palermo acceptance reel", async ({ browser, baseURL }) =>
     const villagers = devices.filter((device) => device.role === "Villager" && device !== devices[0]);
     const firstTarget = villagers[0] ?? devices.find((device) => device !== mafia && device !== devices[0])!;
 
-    await advance(host);
+    await advance(host, "role-reveal", "night");
     for (const device of devices)
       await caption(device.page, "NIGHT ONE", "Residents follow their routes home. Private actions remain on each controller.");
     await host.waitForTimeout(4200);
@@ -143,16 +148,16 @@ test("record a labeled Palermo acceptance reel", async ({ browser, baseURL }) =>
     await choose(doctor.page, firstTarget.name);
     await choose(detective.page, mafia.name);
     await expect(host.getByTestId("host-controls")).toContainText("3/3 choices in");
-    await advance(host);
+    await advance(host, "night", "night-result");
     for (const device of devices)
       await caption(device.page, "DOCTOR PROTECTION", `${firstTarget.name} was attacked, but the protection animation resolves on every screen.`);
     await host.waitForTimeout(7000);
 
-    await advance(host);
+    await advance(host, "night-result", "discussion");
     for (const device of devices)
       await caption(device.page, "DAWN · EVERYONE SURVIVED", "The town returns to the square for face-to-face discussion.");
     await host.waitForTimeout(3200);
-    await advance(host);
+    await advance(host, "discussion", "voting");
     for (const device of devices)
       await caption(device.page, "VOTE ONE", "Private tap targets, immediate feedback, and a synchronized result.");
     const voteTargets = devices.map((device) => device.name);
@@ -162,7 +167,7 @@ test("record a labeled Palermo acceptance reel", async ({ browser, baseURL }) =>
     await choose(devices[3].page, voteTargets[1]);
     await choose(devices[4].page, voteTargets[2]);
     await expect(host.getByTestId("host-controls")).toContainText("5/5 choices in");
-    await advance(host);
+    await advance(host, "voting", "vote-result");
     for (const device of devices)
       await caption(device.page, "TIED VOTE", "The town is divided. Nobody is ejected.");
     await host.waitForTimeout(6200);

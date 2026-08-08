@@ -39,7 +39,13 @@ const CHARACTER_VARIANTS = [
   "character-female-f",
   "character-male-e",
 ];
-const HOME_ROUTE_ORDER = [2, 3, 4, 0, 1, 5];
+const SMALL_HOME_ROUTE_ORDER = [2, 3, 4, 0, 1, 5];
+const LARGE_HOME_ROUTE_ORDER = [2, 3, 4, 6, 7, 8, 9, 0, 1, 5];
+
+function homeIndex(index: number, count: number) {
+  const order = count <= 6 ? SMALL_HOME_ROUTE_ORDER : LARGE_HOME_ROUTE_ORDER;
+  return order[index % Math.min(order.length, Math.max(count, 1))];
+}
 
 function Asset({
   name,
@@ -326,7 +332,12 @@ function playerPosition(
   count: number,
 ): [number, number, number] {
   const angle = (index / Math.max(count, 1)) * Math.PI * 2 - Math.PI / 2;
-  return [Math.cos(angle) * 3.9, 0, Math.sin(angle) * 3.2];
+  const crowded = count > 12;
+  return [
+    Math.cos(angle) * (crowded ? 5.35 : 3.9),
+    0,
+    Math.sin(angle) * (crowded ? 4.45 : 3.2),
+  ];
 }
 
 function homePosition(index: number, count: number): [number, number, number] {
@@ -337,9 +348,22 @@ function homePosition(index: number, count: number): [number, number, number] {
     [3.25, 0, -5.95],
     [6.35, 0, -4.15],
     [-6.9, 0, -0.15],
+    [6.9, 0, -0.15],
+    [6.0, 0, 3.5],
+    [0, 0, 6.55],
+    [-5.9, 0, 3.55],
   ];
-  return homes[
-    HOME_ROUTE_ORDER[index % Math.min(HOME_ROUTE_ORDER.length, Math.max(count, 1))]
+  const home = homes[
+    homeIndex(index, count)
+  ];
+  if (count <= LARGE_HOME_ROUTE_ORDER.length) return home;
+  const radius = Math.hypot(home[0], home[2]) || 1;
+  const doorwayOffset =
+    Math.floor(index / LARGE_HOME_ROUTE_ORDER.length) === 0 ? -0.42 : 0.42;
+  return [
+    home[0] + (-home[2] / radius) * doorwayOffset,
+    0,
+    home[2] + (home[0] / radius) * doorwayOffset,
   ];
 }
 
@@ -433,7 +457,7 @@ function AnimatedResident({
     }
   });
 
-  return <primitive object={character} scale={2.65} />;
+  return <primitive object={character} scale={2.05} />;
 }
 
 function Resident({
@@ -468,6 +492,14 @@ function Resident({
   useFrame((_, delta) => {
     if (!group.current) return;
     const phaseProgress = progress.current;
+    const motionProgress = Math.max(
+      0,
+      phaseProgress -
+        (count > LARGE_HOME_ROUTE_ORDER.length &&
+        Math.floor(index / LARGE_HOME_ROUTE_ORDER.length) > 0
+          ? 0.035
+          : 0),
+    );
     let x = position[0];
     let y = 0;
     let z = position[2];
@@ -476,14 +508,14 @@ function Resident({
     let facing = Math.atan2(-position[0], -position[2]);
 
     if (state.phase === "night") {
-      const travel = THREE.MathUtils.smoothstep(phaseProgress, 0.02, 0.23);
+      const travel = THREE.MathUtils.smoothstep(motionProgress, 0.02, 0.23);
       const routed = residentRoute(position, home, travel);
       const next = residentRoute(position, home, Math.min(1, travel + 0.015));
       x = routed.x;
       z = routed.z;
       y = Math.sin(travel * Math.PI) * 0.08;
       facing = Math.atan2(next.x - routed.x, next.z - routed.z);
-      const doorwayFade = THREE.MathUtils.smoothstep(phaseProgress, 0.22, 0.28);
+      const doorwayFade = THREE.MathUtils.smoothstep(motionProgress, 0.22, 0.28);
       scale = 1 - doorwayFade * 0.65;
       visible = player.alive && doorwayFade < 0.99;
     } else if (state.phase === "night-result") {
@@ -493,7 +525,7 @@ function Resident({
       visible = isNightTarget;
     } else if (state.phase === "discussion") {
       const returnToSquare = THREE.MathUtils.smoothstep(
-        phaseProgress,
+        motionProgress,
         0.01,
         0.09,
       );
@@ -556,11 +588,14 @@ function Resident({
       />
       <Html
         center
-        position={[0, 2.35, 0]}
+        position={[0, 1.92, 0]}
         distanceFactor={9}
         style={{ pointerEvents: "none" }}
       >
-        <div ref={label} className="resident-label">
+        <div
+          ref={label}
+          className={`resident-label ${count > 12 ? "crowded" : ""}`}
+        >
           <span>{player.emoji}</span>
           {player.name}
         </div>
@@ -662,7 +697,7 @@ function Assassin({ progress }: { progress: ProgressRef }) {
       action.getClip().duration *
       THREE.MathUtils.smoothstep(progress.current, 0.16, 0.46);
   });
-  return <primitive object={assassin} scale={2.75} />;
+  return <primitive object={assassin} scale={2.12} />;
 }
 
 function Protection({
@@ -798,7 +833,10 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
   const { camera, scene } = useThree();
   const progress = useRef(0);
   const cameraLook = useRef(new THREE.Vector3(0, 0.7, 0));
-  const duration = Math.max(1, PHASE_LENGTHS[state.phase] * 1000);
+  const duration = Math.max(
+    1,
+    (state.phaseDuration ?? PHASE_LENGTHS[state.phase]) * 1000,
+  );
   const isNight =
     state.phase === "night" ||
     state.phase === "night-result" ||
@@ -810,7 +848,7 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
   );
   const cinematicHouseIndex =
     cinematicTargetIndex >= 0
-      ? HOME_ROUTE_ORDER[cinematicTargetIndex % HOME_ROUTE_ORDER.length]
+      ? homeIndex(cinematicTargetIndex, state.players.length)
       : -1;
   const houseWindowState = (
     houseIndex: number,
@@ -852,17 +890,30 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
       );
       const radial = target.clone().setY(0).normalize();
       const dolly = THREE.MathUtils.lerp(5.5, 4.35, progress.current);
-      desired = target.clone().addScaledVector(radial, -dolly).setY(3.25);
+      desired = target.clone().addScaledVector(radial, dolly + 1.2).setY(4.4);
       desiredLook = target.clone().setY(1.1);
     } else if (state.phase === "vote-result") {
       const revealLift = THREE.MathUtils.smoothstep(progress.current, 0.18, 0.58);
       desired = new THREE.Vector3(7.4, 3.8 + revealLift * 0.7, 7.7);
       desiredLook = new THREE.Vector3(0, 0.9 + revealLift * 2.2, 0);
     } else {
-      const radius = 12.4;
+      const crowded = state.players.length > 12;
+      const expanded = state.players.length > 6;
+      const radius = crowded ? 20 : expanded ? 15.5 : 12.4;
+      const cameraHeight = crowded
+        ? isNight
+          ? 13
+          : 12
+        : expanded
+          ? isNight
+            ? 9.2
+            : 8.6
+          : isNight
+            ? 6.8
+            : 6.3;
       desired = new THREE.Vector3(
         Math.sin(angle) * radius,
-        isNight ? 6.8 : 6.3,
+        cameraHeight,
         Math.cos(angle) * radius,
       );
       desiredLook = new THREE.Vector3(0, 0.85, 0);
@@ -921,14 +972,22 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
       <House position={[3.4, 0, -7.35]} rotation={-0.06} color="#b88071" tall windowState={houseWindowState(3)} />
       <House position={[7.1, 0, -5.2]} rotation={-0.38} color="#df9b6c" windowState={houseWindowState(4)} />
       <House position={[-8.2, 0, 0.1]} rotation={1.2} color="#d7ad7d" windowState={houseWindowState(5)} />
+      {state.players.length > 6 && (
+        <>
+          <House position={[8.2, 0, 0.1]} rotation={-1.2} color="#c98567" windowState={houseWindowState(6)} />
+          <House position={[7.2, 0, 4.65]} rotation={-2.25} color="#dcb075" tall windowState={houseWindowState(7)} />
+          <House position={[0, 0, 8]} rotation={Math.PI} color="#b88071" windowState={houseWindowState(8)} />
+          <House position={[-7.1, 0, 4.7]} rotation={2.25} color="#df9b6c" windowState={houseWindowState(9)} />
+        </>
+      )}
       <Asset
         name="crypt-large"
-        position={[8.8, 0, 0]}
-        rotation={[0, -Math.PI / 2, 0]}
-        scale={1.05}
+        position={[10.2, 0, 2.6]}
+        rotation={[0, -2.05, 0]}
+        scale={0.86}
       />
-      <MarketStall position={[-5.2, 0, 3.8]} rotation={0.5} color="#b84842" />
-      <MarketStall position={[5.25, 0, 3.25]} rotation={-0.55} color="#d1a445" />
+      <MarketStall position={[-3.9, 0, 4.3]} rotation={0.35} color="#b84842" />
+      <MarketStall position={[3.9, 0, 4.25]} rotation={-0.35} color="#d1a445" />
       <Asset name="fire-basket" position={[-4.1, 0, 1.85]} scale={0.9} />
       <Asset name="fire-basket" position={[4.2, 0, -1.65]} scale={0.9} />
       <FireGlow position={[-4.1, 0, 1.85]} />
@@ -1035,6 +1094,10 @@ export default function PalermoStage({
       : state.phase === "vote-result"
         ? "vote"
         : "ambient");
+  const renderQuality =
+    quality === "cinematic" && state.players.length <= 12
+      ? "cinematic"
+      : "performance";
   useEffect(() => {
     try {
       const canvas = document.createElement("canvas");
@@ -1071,16 +1134,16 @@ export default function PalermoStage({
       ) : (
         <StageBoundary fallback={<FlatFallback state={state} />}>
           <Canvas
-            shadows={quality === "cinematic"}
-            dpr={quality === "cinematic" ? [1, 1.5] : 1}
+            shadows={renderQuality === "cinematic"}
+            dpr={renderQuality === "cinematic" ? [1, 1.5] : 1}
             camera={{ position: [10, 8, 10], fov: 42, near: 0.1, far: 80 }}
             gl={{
-              antialias: quality === "cinematic",
+              antialias: renderQuality === "cinematic",
               powerPreference: "high-performance",
             }}
           >
             <Suspense fallback={null}>
-              <Scene state={state} quality={quality} />
+              <Scene state={state} quality={renderQuality} />
             </Suspense>
           </Canvas>
         </StageBoundary>

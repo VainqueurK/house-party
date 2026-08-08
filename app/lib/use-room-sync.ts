@@ -39,6 +39,22 @@ const profiles = [
   { emoji: "🌙", color: "purple" },
   { emoji: "🐙", color: "coral" },
   { emoji: "🦋", color: "mint" },
+  { emoji: "🦁", color: "orange" },
+  { emoji: "🍒", color: "pink" },
+  { emoji: "🐝", color: "yellow" },
+  { emoji: "🎲", color: "blue" },
+  { emoji: "🧿", color: "purple" },
+  { emoji: "🐯", color: "orange" },
+  { emoji: "🦄", color: "pink" },
+  { emoji: "🌵", color: "green" },
+  { emoji: "🍋", color: "yellow" },
+  { emoji: "🎸", color: "coral" },
+  { emoji: "🛼", color: "mint" },
+  { emoji: "🪐", color: "purple" },
+  { emoji: "🐼", color: "blue" },
+  { emoji: "🍉", color: "green" },
+  { emoji: "🦖", color: "mint" },
+  { emoji: "🎭", color: "coral" },
 ];
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -47,6 +63,18 @@ const supabase = url && key ? createClient(url, key) : null;
 
 function storageKey(kind: string, room: string) {
   return `house-party:${kind}:${room.toUpperCase()}`;
+}
+
+function getOrCreateDeviceId() {
+  const stored = localStorage.getItem("house-party:player-id");
+  const cookie = document.cookie
+    .split("; ")
+    .find((item) => item.startsWith("house-party-device="))
+    ?.split("=")[1];
+  const id = stored || cookie || crypto.randomUUID();
+  localStorage.setItem("house-party:player-id", id);
+  document.cookie = `house-party-device=${encodeURIComponent(id)}; Max-Age=31536000; Path=/; SameSite=Lax${location.protocol === "https:" ? "; Secure" : ""}`;
+  return id;
 }
 
 export function useRoomSync({
@@ -65,22 +93,21 @@ export function useRoomSync({
   const [chat, setChat] = useState<RoomChat[]>([]);
   const [gameState, setGameState] = useState<PalermoState | null>(null);
   const [myRole, setMyRole] = useState<PalermoRole | null>(null);
+  const [roleIntel, setRoleIntel] = useState<string[]>([]);
   const [investigationResult, setInvestigationResult] =
     useState<InvestigationResult | null>(null);
   const [actions, setActions] = useState<GameAction[]>([]);
   const [syncRequests, setSyncRequests] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
+  const [hostConnected, setHostConnected] = useState(false);
   const [roomClosed, setRoomClosed] = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [playerId] = useState(() => {
     if (typeof window === "undefined") return "server";
-    const existing = localStorage.getItem("house-party:player-id");
-    if (existing) return existing;
-    const created = crypto.randomUUID();
-    localStorage.setItem("house-party:player-id", created);
-    return created;
+    return getOrCreateDeviceId();
   });
   const profile = useMemo(() => {
-    const source = name.trim().toLowerCase() || playerId;
+    const source = `${name.trim().toLowerCase()}:${playerId}`;
     const hash = [...source].reduce(
       (sum, char, index) => sum + char.charCodeAt(0) * (index + 1),
       0,
@@ -94,10 +121,18 @@ export function useRoomSync({
       storageKey("role", code),
     ) as PalermoRole | null;
     const savedState = localStorage.getItem(storageKey("state", code));
+    const savedRoleIntel = localStorage.getItem(storageKey("role-intel", code));
     const savedInvestigation = localStorage.getItem(
       storageKey("investigation", code),
     );
     setMyRole(savedRole);
+    if (savedRoleIntel) {
+      try {
+        setRoleIntel(JSON.parse(savedRoleIntel) as string[]);
+      } catch {
+        localStorage.removeItem(storageKey("role-intel", code));
+      }
+    }
     if (savedInvestigation) {
       try {
         setInvestigationResult(
@@ -126,6 +161,14 @@ export function useRoomSync({
     let closed = false;
     let requestedRoleRevision = 0;
     let presenceTracked = false;
+    let reconnectTimer: number | undefined;
+    const scheduleReconnect = () => {
+      if (closed || reconnectTimer) return;
+      reconnectTimer = window.setTimeout(
+        () => setReconnectAttempt((attempt) => attempt + 1),
+        1_500 + Math.floor(Math.random() * 1_000),
+      );
+    };
     const roomCode = code.toUpperCase();
     const channel = supabase.channel(`room:${roomCode}`, {
       config: {
@@ -156,7 +199,12 @@ export function useRoomSync({
       )
         return;
       presenceTracked = true;
-      await channel.track({ id: playerId, name, ...profile });
+      await channel.track({
+        id: playerId,
+        name,
+        ...profile,
+        deviceRole: role === "host-player" ? "host-player" : "player",
+      });
       void requestSync();
     };
 
@@ -181,14 +229,40 @@ export function useRoomSync({
         const state = channel.presenceState<
           RoomPlayer & { deviceRole?: string }
         >();
-        const next = Object.values(state)
-          .flat()
-          .filter((entry) => entry.deviceRole !== "display");
-        setPlayers(
-          next.filter(
-            (entry, index) =>
-              next.findIndex((item) => item.id === entry.id) === index,
+        const next = Object.values(state).flat();
+        setHostConnected(
+          next.some(
+            (entry) =>
+              entry.deviceRole === "display" || entry.deviceRole === "host-player",
           ),
+        );
+        const playerPresences = next.filter(
+          (entry) => entry.deviceRole !== "display",
+        );
+        const deduplicated = playerPresences.filter(
+            (entry, index) =>
+              playerPresences.findIndex((item) => item.id === entry.id) === index,
+          ).sort((a, b) => a.id.localeCompare(b.id));
+        const usedEmojis = new Set<string>();
+        setPlayers(
+          deduplicated.map((entry) => {
+            let assigned = profiles.find((item) => item.emoji === entry.emoji) ?? profiles[0];
+            if (usedEmojis.has(assigned.emoji)) {
+              const start = [...entry.id].reduce(
+                (sum, character) => sum + character.charCodeAt(0),
+                0,
+              );
+              for (let offset = 0; offset < profiles.length; offset += 1) {
+                const candidate = profiles[(start + offset) % profiles.length];
+                if (!usedEmojis.has(candidate.emoji)) {
+                  assigned = candidate;
+                  break;
+                }
+              }
+            }
+            usedEmojis.add(assigned.emoji);
+            return { ...entry, ...assigned };
+          }),
         );
       })
       .on("broadcast", { event: "chat-message" }, ({ payload }) => {
@@ -199,10 +273,13 @@ export function useRoomSync({
         if (!isPlayer || payload?.targetId !== playerId || !payload?.role)
           return;
         setMyRole(payload.role as PalermoRole);
+        const intel = Array.isArray(payload.teammates) ? payload.teammates as string[] : [];
+        setRoleIntel(intel);
         localStorage.setItem(
           storageKey("role", roomCode),
           payload.role as string,
         );
+        localStorage.setItem(storageKey("role-intel", roomCode), JSON.stringify(intel));
       })
       .on("broadcast", { event: "investigation-result" }, ({ payload }) => {
         if (
@@ -280,14 +357,27 @@ export function useRoomSync({
         if (isPlayer && !isHost) {
           localStorage.removeItem(storageKey("state", roomCode));
           localStorage.removeItem(storageKey("role", roomCode));
+          localStorage.removeItem(storageKey("role-intel", roomCode));
           localStorage.removeItem(storageKey("action", roomCode));
           localStorage.removeItem(storageKey("investigation", roomCode));
+          setGameState(null);
+          setMyRole(null);
+          setRoleIntel([]);
+          setInvestigationResult(null);
           setRoomClosed(true);
         }
       })
       .subscribe(async (status) => {
         setConnected(status === "SUBSCRIBED");
-        if (status !== "SUBSCRIBED") return;
+        if (status !== "SUBSCRIBED") {
+          if (
+            status === "TIMED_OUT" ||
+            status === "CHANNEL_ERROR" ||
+            status === "CLOSED"
+          )
+            scheduleReconnect();
+          return;
+        }
         mainReady = true;
         if (isPlayer) await trackPlayerWhenReady();
         else
@@ -317,10 +407,13 @@ export function useRoomSync({
         .on("broadcast", { event: "private-role" }, ({ payload }) => {
           if (!payload?.role) return;
           setMyRole(payload.role as PalermoRole);
+          const intel = Array.isArray(payload.teammates) ? payload.teammates as string[] : [];
+          setRoleIntel(intel);
           localStorage.setItem(
             storageKey("role", roomCode),
             payload.role as string,
           );
+          localStorage.setItem(storageKey("role-intel", roomCode), JSON.stringify(intel));
         })
         .on("broadcast", { event: "investigation-result" }, ({ payload }) => {
           if (typeof payload?.round !== "number" || !payload?.targetName)
@@ -337,7 +430,12 @@ export function useRoomSync({
             privateReady = true;
             void trackPlayerWhenReady();
             void requestSync();
-          }
+          } else if (
+            status === "TIMED_OUT" ||
+            status === "CHANNEL_ERROR" ||
+            status === "CLOSED"
+          )
+            scheduleReconnect();
         });
     }
 
@@ -355,6 +453,7 @@ export function useRoomSync({
     document.addEventListener("visibilitychange", recover);
     return () => {
       closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
       channelRef.current = null;
       setConnected(false);
       window.removeEventListener("pagehide", leave);
@@ -363,7 +462,7 @@ export function useRoomSync({
       leave();
       if (privateChannel) void supabase.removeChannel(privateChannel);
     };
-  }, [code, enabled, name, playerId, profile, role]);
+  }, [code, enabled, name, playerId, profile, reconnectAttempt, role]);
 
   const broadcast = useCallback(async (event: string, payload: object) => {
     await channelRef.current?.send({ type: "broadcast", event, payload });
@@ -395,10 +494,18 @@ export function useRoomSync({
       new Promise<void>((resolve) => window.setTimeout(resolve, 1200)),
     ]);
   }, [broadcast]);
+  const clearLocalRoom = useCallback(() => {
+    for (const kind of ["state", "role", "role-intel", "action", "investigation"])
+      localStorage.removeItem(storageKey(kind, code));
+    setGameState(null);
+    setMyRole(null);
+    setRoleIntel([]);
+    setInvestigationResult(null);
+  }, [code]);
 
   const sendPrivateRole = useCallback(
-    (targetId: string, roleToSend: PalermoRole) =>
-      broadcast("private-role", { targetId, role: roleToSend }),
+    (targetId: string, roleToSend: PalermoRole, teammates: string[] = []) =>
+      broadcast("private-role", { targetId, role: roleToSend, teammates }),
     [broadcast],
   );
 
@@ -411,12 +518,14 @@ export function useRoomSync({
   return {
     enabled: Boolean(supabase),
     connected,
+    hostConnected,
     roomClosed,
     playerId,
     players,
     chat,
     gameState,
     myRole,
+    roleIntel,
     investigationResult,
     actions,
     syncRequests,
@@ -426,7 +535,10 @@ export function useRoomSync({
     sendPrivateRole,
     sendPrivateInvestigation,
     closeRoom,
+    clearLocalRoom,
     clearActions: () => setActions([]),
+    removePlayerActions: (id: string) =>
+      setActions((current) => current.filter((action) => action.playerId !== id)),
     clearSyncRequests: () => setSyncRequests([]),
   };
 }
