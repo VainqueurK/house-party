@@ -1840,6 +1840,37 @@ em {
       rgba(4, 5, 12, 0.3)
     );
 }
+.phase-curtain {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: #070812;
+  animation: phase-curtain-open .9s cubic-bezier(.22,.8,.24,1) both;
+}
+@keyframes phase-curtain-open {
+  0% { opacity: .92; }
+  45% { opacity: .42; }
+  100% { opacity: 0; }
+}
+.is-cinematic::before,
+.is-cinematic::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  height: clamp(20px, 4.5vh, 48px);
+  pointer-events: none;
+  background: #05060c;
+  animation: letterbox-in .75s cubic-bezier(.22,.8,.24,1) both;
+}
+.is-cinematic::before { top: 0; transform-origin: top; }
+.is-cinematic::after { bottom: 0; transform-origin: bottom; }
+@keyframes letterbox-in {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
 .day-phase .cinematic-shade {
   background:
     linear-gradient(

@@ -1290,7 +1290,6 @@ function PlayerController({
     >
       <div className="controller-world" aria-hidden="true">
         <PalermoStage
-          key={state.cinematic?.id ?? "ambient"}
           state={state}
           quality="performance"
         />
@@ -1645,11 +1644,11 @@ function GameBoard({
       className={`game-screen game-screen-3d ${isNight ? "night-phase" : "day-phase"} ${cinematic ? "is-cinematic" : ""}`}
     >
       <PalermoStage
-        key={state.cinematic?.id ?? "ambient"}
         state={state}
         quality={graphicsQuality}
       />
       <div className="cinematic-shade" />
+      <div className="phase-curtain" key={`phase-curtain-${state.revision}`} />
       <div className="game-status cinematic-status">
         <span className="live-pill">
           <span /> DISPLAY MODE

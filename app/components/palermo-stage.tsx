@@ -39,6 +39,7 @@ const CHARACTER_VARIANTS = [
   "character-female-f",
   "character-male-e",
 ];
+const HOME_ROUTE_ORDER = [2, 3, 4, 0, 1, 5];
 
 function Asset({
   name,
@@ -79,11 +80,13 @@ function House({
   rotation = 0,
   color,
   tall = false,
+  windowState = "warm",
 }: {
   position: [number, number, number];
   rotation?: number;
   color: string;
   tall?: boolean;
+  windowState?: "warm" | "dark" | "protected";
 }) {
   const height = tall ? 3.7 : 2.8;
   const shutter = color === "#b88071" ? "#315c64" : "#486d69";
@@ -107,9 +110,27 @@ function House({
           <mesh>
             <boxGeometry args={[0.52, 0.68, 0.05]} />
             <meshStandardMaterial
-              color="#ffd780"
-              emissive="#e9a94b"
-              emissiveIntensity={0.9}
+              color={
+                windowState === "dark"
+                  ? "#181927"
+                  : windowState === "protected"
+                    ? "#a9ffe7"
+                    : "#ffd780"
+              }
+              emissive={
+                windowState === "dark"
+                  ? "#070812"
+                  : windowState === "protected"
+                    ? "#49dcb2"
+                    : "#e9a94b"
+              }
+              emissiveIntensity={
+                windowState === "dark"
+                  ? 0.08
+                  : windowState === "protected"
+                    ? 2.4
+                    : 0.9
+              }
             />
           </mesh>
           <mesh position={[-0.36, 0, 0.025]} rotation-y={-0.14}>
@@ -279,6 +300,27 @@ function NightImpact({ state, progress }: { state: PalermoState; progress: Progr
   );
 }
 
+function FireGlow({ position }: { position: [number, number, number] }) {
+  const light = useRef<THREE.PointLight>(null);
+  useFrame(() => {
+    if (!light.current) return;
+    const shimmer =
+      Math.sin(performance.now() * 0.008 + position[0]) * 0.16 +
+      Math.sin(performance.now() * 0.019 + position[2]) * 0.08;
+    light.current.intensity = 7.5 + shimmer * 4;
+  });
+  return (
+    <pointLight
+      ref={light}
+      position={[position[0], 1.25, position[2]]}
+      color="#ff8a45"
+      intensity={7.5}
+      distance={5.5}
+      decay={2}
+    />
+  );
+}
+
 function playerPosition(
   index: number,
   count: number,
@@ -296,9 +338,8 @@ function homePosition(index: number, count: number): [number, number, number] {
     [6.35, 0, -4.15],
     [-6.9, 0, -0.15],
   ];
-  const routeOrder = [2, 3, 4, 0, 1, 5];
   return homes[
-    routeOrder[index % Math.min(routeOrder.length, Math.max(count, 1))]
+    HOME_ROUTE_ORDER[index % Math.min(HOME_ROUTE_ORDER.length, Math.max(count, 1))]
   ];
 }
 
@@ -762,6 +803,25 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
     state.phase === "night" ||
     state.phase === "night-result" ||
     state.phase === "role-reveal";
+  const cinematicTargetId =
+    state.cinematic?.kind === "night" ? state.cinematic.attackedId : undefined;
+  const cinematicTargetIndex = state.players.findIndex(
+    (player) => player.id === cinematicTargetId,
+  );
+  const cinematicHouseIndex =
+    cinematicTargetIndex >= 0
+      ? HOME_ROUTE_ORDER[cinematicTargetIndex % HOME_ROUTE_ORDER.length]
+      : -1;
+  const houseWindowState = (
+    houseIndex: number,
+  ): "warm" | "dark" | "protected" =>
+    houseIndex !== cinematicHouseIndex
+      ? "warm"
+      : state.cinematic?.kind === "night" && state.cinematic.protected
+        ? "protected"
+        : state.cinematic?.kind === "night" && state.cinematic.killedId
+          ? "dark"
+          : "warm";
   useEffect(() => {
     scene.fog = new THREE.FogExp2(
       isNight ? "#090b1b" : "#d98f68",
@@ -855,12 +915,12 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
         <meshStandardMaterial color={isNight ? "#3b3c50" : "#b88969"} roughness={1} />
       </mesh>
       <Fountain />
-      <House position={[-7.7, 0, -3.8]} rotation={0.45} color="#d98462" tall />
-      <House position={[-4.2, 0, -7.1]} rotation={0.08} color="#dcb075" />
-      <House position={[-0.4, 0, -7.6]} rotation={0} color="#c98567" tall />
-      <House position={[3.4, 0, -7.35]} rotation={-0.06} color="#b88071" tall />
-      <House position={[7.1, 0, -5.2]} rotation={-0.38} color="#df9b6c" />
-      <House position={[-8.2, 0, 0.1]} rotation={1.2} color="#d7ad7d" />
+      <House position={[-7.7, 0, -3.8]} rotation={0.45} color="#d98462" tall windowState={houseWindowState(0)} />
+      <House position={[-4.2, 0, -7.1]} rotation={0.08} color="#dcb075" windowState={houseWindowState(1)} />
+      <House position={[-0.4, 0, -7.6]} rotation={0} color="#c98567" tall windowState={houseWindowState(2)} />
+      <House position={[3.4, 0, -7.35]} rotation={-0.06} color="#b88071" tall windowState={houseWindowState(3)} />
+      <House position={[7.1, 0, -5.2]} rotation={-0.38} color="#df9b6c" windowState={houseWindowState(4)} />
+      <House position={[-8.2, 0, 0.1]} rotation={1.2} color="#d7ad7d" windowState={houseWindowState(5)} />
       <Asset
         name="crypt-large"
         position={[8.8, 0, 0]}
@@ -871,6 +931,8 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
       <MarketStall position={[5.25, 0, 3.25]} rotation={-0.55} color="#d1a445" />
       <Asset name="fire-basket" position={[-4.1, 0, 1.85]} scale={0.9} />
       <Asset name="fire-basket" position={[4.2, 0, -1.65]} scale={0.9} />
+      <FireGlow position={[-4.1, 0, 1.85]} />
+      <FireGlow position={[4.2, 0, -1.65]} />
       <Asset name="fence-damaged" position={[8.7, 0, 3.8]} rotation={[0, -0.9, 0]} />
       <Asset name="coffin-old" position={[9.3, 0, 3.25]} rotation={[0, -0.7, 0]} scale={0.8} />
       <Asset name="hay-bale-bundled" position={[-7.4, 0, 3.6]} rotation={[0, 0.45, 0]} />
@@ -966,6 +1028,13 @@ export default function PalermoStage({
   quality?: Quality;
 }) {
   const [webgl, setWebgl] = useState<boolean | null>(null);
+  const cinematicKind =
+    state.cinematic?.kind ??
+    (state.phase === "night-result"
+      ? "night"
+      : state.phase === "vote-result"
+        ? "vote"
+        : "ambient");
   useEffect(() => {
     try {
       const canvas = document.createElement("canvas");
@@ -985,7 +1054,7 @@ export default function PalermoStage({
         className="palermo-stage"
         data-testid="palermo-3d-stage"
         data-quality={quality}
-        data-cinematic={state.cinematic?.kind ?? "ambient"}
+        data-cinematic={cinematicKind}
       >
         <FlatFallback state={state} />
       </div>
@@ -995,7 +1064,7 @@ export default function PalermoStage({
       className="palermo-stage"
       data-testid="palermo-3d-stage"
       data-quality={quality}
-      data-cinematic={state.cinematic?.kind ?? "ambient"}
+      data-cinematic={cinematicKind}
     >
       {webgl === null ? (
         <div className="stage-loading">Waking Palermo…</div>
