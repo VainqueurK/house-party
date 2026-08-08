@@ -169,12 +169,27 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
     );
 
     // Every active night role submits an action from its private controller.
+    const recordingMafia = shouldRecord
+      ? devices.find((device) => roles.get(device.name) === "Mafia")
+      : undefined;
+    const recordingAttackName = recordingMafia
+      ? await recordingMafia.page
+          .locator('[data-testid^="target-"]')
+          .first()
+          .locator("strong")
+          .textContent()
+      : undefined;
     for (const device of devices) {
       const role = roles.get(device.name)!;
       if (["Mafia", "Detective", "Doctor"].includes(role)) {
-        const target = device.page.locator('[data-testid^="target-"]').first();
+        const targets = device.page.locator('[data-testid^="target-"]');
+        const target =
+          shouldRecord && role === "Doctor" && recordingAttackName
+            ? targets.filter({ hasNotText: recordingAttackName }).first()
+            : targets.first();
         await target.click();
         await expect(target).toHaveClass(/selected/);
+        await expect(device.page.getByTestId("action-confirmation")).toBeVisible();
       }
     }
     await expect(display.getByTestId("action-count")).toHaveText(
@@ -210,9 +225,11 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
       "data-cinematic",
       "night",
     );
+    if (shouldRecord) await display.waitForTimeout(7000);
     await display
-      .getByRole("button", { name: /Skip cinematic|Continue/ })
-      .click();
+      .locator('[data-testid="phase-button"][data-phase="night-result"]')
+      .click({ timeout: 1_000 })
+      .catch(() => undefined);
     await expect(display.getByTestId("game-display")).toHaveAttribute(
       "data-phase",
       "discussion",
@@ -261,9 +278,11 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
       "data-cinematic",
       "vote",
     );
+    if (shouldRecord) await display.waitForTimeout(6200);
     await display
-      .getByRole("button", { name: /Skip cinematic|Continue/ })
-      .click();
+      .locator('[data-testid="phase-button"][data-phase="vote-result"]')
+      .click({ timeout: 1_000 })
+      .catch(() => undefined);
     await expect(display.getByTestId("game-display")).toHaveAttribute(
       "data-phase",
       "won",

@@ -191,6 +191,94 @@ function Fountain() {
   );
 }
 
+function MarketStall({
+  position,
+  rotation = 0,
+  color,
+}: {
+  position: [number, number, number];
+  rotation?: number;
+  color: string;
+}) {
+  return (
+    <group position={position} rotation-y={rotation}>
+      <mesh castShadow position-y={0.72}>
+        <boxGeometry args={[2.1, 0.16, 1.05]} />
+        <meshStandardMaterial color="#6d4431" roughness={1} />
+      </mesh>
+      {[-0.85, 0.85].map((x) => (
+        <mesh key={x} castShadow position={[x, 1.45, 0]}>
+          <boxGeometry args={[0.1, 2.85, 0.1]} />
+          <meshStandardMaterial color="#493128" roughness={1} />
+        </mesh>
+      ))}
+      <mesh castShadow position-y={2.55} rotation-z={0.02}>
+        <boxGeometry args={[2.45, 0.12, 1.5]} />
+        <meshStandardMaterial color={color} roughness={0.88} />
+      </mesh>
+      {[-0.62, 0, 0.62].map((x, index) => (
+        <mesh key={x} castShadow position={[x, 0.93, 0]}>
+          <sphereGeometry args={[0.18 + index * 0.02, 10, 8]} />
+          <meshStandardMaterial
+            color={["#c94e3f", "#e2b94f", "#638f55"][index]}
+            roughness={1}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function NightImpact({ state, progress }: { state: PalermoState; progress: ProgressRef }) {
+  const group = useRef<THREE.Group>(null);
+  const attackedId =
+    state.cinematic?.kind === "night" ? state.cinematic.attackedId : undefined;
+  const index = state.players.findIndex((player) => player.id === attackedId);
+  const target = homePosition(Math.max(0, index), state.players.length);
+  const active = state.phase === "night-result" && Boolean(attackedId);
+  useFrame(() => {
+    if (!group.current) return;
+    const strike = THREE.MathUtils.smoothstep(progress.current, 0.31, 0.42);
+    const fade = 1 - THREE.MathUtils.smoothstep(progress.current, 0.58, 0.78);
+    group.current.scale.setScalar(0.25 + strike * 2.3);
+    group.current.visible = strike * fade > 0.01;
+    group.current.rotation.z = -0.6 + progress.current * 0.3;
+    group.current.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial)
+        child.material.opacity = strike * fade;
+    });
+  });
+  if (!active) return null;
+  const protectedAttack =
+    state.cinematic?.kind === "night" && state.cinematic.protected;
+  const color = protectedAttack ? "#8dffe1" : "#ff4858";
+  return (
+    <group ref={group} position={[target[0], 1.35, target[2] + 0.3]}>
+      <mesh rotation-x={Math.PI / 2}>
+        <torusGeometry args={[0.58, 0.07, 10, 42]} />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={5}
+          transparent
+        />
+      </mesh>
+      {!protectedAttack && (
+        <mesh rotation-z={-0.45}>
+          <boxGeometry args={[1.7, 0.08, 0.08]} />
+          <meshStandardMaterial
+            color={color}
+            emissive={color}
+            emissiveIntensity={6}
+            transparent
+          />
+        </mesh>
+      )}
+      <pointLight color={color} intensity={18} distance={5} />
+    </group>
+  );
+}
+
 function playerPosition(
   index: number,
   count: number,
@@ -668,6 +756,7 @@ function VotePortal({
 function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
   const { camera, scene } = useThree();
   const progress = useRef(0);
+  const cameraLook = useRef(new THREE.Vector3(0, 0.7, 0));
   const duration = Math.max(1, PHASE_LENGTHS[state.phase] * 1000);
   const isNight =
     state.phase === "night" ||
@@ -685,18 +774,43 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
       0,
       1,
     );
-    const cinematic =
-      state.phase === "night-result" || state.phase === "vote-result";
     const drift = Math.sin(performance.now() * 0.00012) * 0.09;
     const angle = 0.72 + drift;
-    const radius = cinematic ? 10.6 : 12.6;
-    const desired = new THREE.Vector3(
-      Math.sin(angle) * radius,
-      cinematic ? 7.1 : isNight ? 9.2 : 9.8,
-      Math.cos(angle) * radius,
-    );
-    camera.position.lerp(desired, 1 - Math.exp(-delta * 1.25));
-    camera.lookAt(0, 0.7, 0);
+    let desired: THREE.Vector3;
+    let desiredLook: THREE.Vector3;
+    if (
+      state.phase === "night-result" &&
+      state.cinematic?.kind === "night" &&
+      state.cinematic.attackedId
+    ) {
+      const attackedId = state.cinematic.attackedId;
+      const index = state.players.findIndex(
+        (player) => player.id === attackedId,
+      );
+      const target = new THREE.Vector3(
+        ...homePosition(Math.max(0, index), state.players.length),
+      );
+      const radial = target.clone().setY(0).normalize();
+      const dolly = THREE.MathUtils.lerp(5.5, 4.35, progress.current);
+      desired = target.clone().addScaledVector(radial, -dolly).setY(3.25);
+      desiredLook = target.clone().setY(1.1);
+    } else if (state.phase === "vote-result") {
+      const revealLift = THREE.MathUtils.smoothstep(progress.current, 0.18, 0.58);
+      desired = new THREE.Vector3(7.4, 3.8 + revealLift * 0.7, 7.7);
+      desiredLook = new THREE.Vector3(0, 0.9 + revealLift * 2.2, 0);
+    } else {
+      const radius = 12.4;
+      desired = new THREE.Vector3(
+        Math.sin(angle) * radius,
+        isNight ? 6.8 : 6.3,
+        Math.cos(angle) * radius,
+      );
+      desiredLook = new THREE.Vector3(0, 0.85, 0);
+    }
+    const cameraEase = 1 - Math.exp(-delta * 1.65);
+    camera.position.lerp(desired, cameraEase);
+    cameraLook.current.lerp(desiredLook, cameraEase);
+    camera.lookAt(cameraLook.current);
   });
 
   return (
@@ -736,6 +850,10 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
           roughness={0.95}
         />
       </mesh>
+      <mesh receiveShadow rotation-x={-Math.PI / 2} position-y={0.015}>
+        <ringGeometry args={[4.9, 5.25, 48]} />
+        <meshStandardMaterial color={isNight ? "#3b3c50" : "#b88969"} roughness={1} />
+      </mesh>
       <Fountain />
       <House position={[-7.7, 0, -3.8]} rotation={0.45} color="#d98462" tall />
       <House position={[-4.2, 0, -7.1]} rotation={0.08} color="#dcb075" />
@@ -749,6 +867,14 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
         rotation={[0, -Math.PI / 2, 0]}
         scale={1.05}
       />
+      <MarketStall position={[-5.2, 0, 3.8]} rotation={0.5} color="#b84842" />
+      <MarketStall position={[5.25, 0, 3.25]} rotation={-0.55} color="#d1a445" />
+      <Asset name="fire-basket" position={[-4.1, 0, 1.85]} scale={0.9} />
+      <Asset name="fire-basket" position={[4.2, 0, -1.65]} scale={0.9} />
+      <Asset name="fence-damaged" position={[8.7, 0, 3.8]} rotation={[0, -0.9, 0]} />
+      <Asset name="coffin-old" position={[9.3, 0, 3.25]} rotation={[0, -0.7, 0]} scale={0.8} />
+      <Asset name="hay-bale-bundled" position={[-7.4, 0, 3.6]} rotation={[0, 0.45, 0]} />
+      <Asset name="lantern-glass" position={[0.55, 0.55, -4.65]} scale={0.8} />
       <Asset name="pine-crooked" position={[-8.7, 0, 0.2]} scale={1.15} />
       <Asset name="lightpost-single" position={[-3.3, 0, 2.6]} scale={1.15} />
       <Asset
@@ -784,6 +910,7 @@ function Scene({ state, quality }: { state: PalermoState; quality: Quality }) {
         />
       ))}
       <ShadowFigure state={state} progress={progress} />
+      <NightImpact state={state} progress={progress} />
       <Protection state={state} progress={progress} />
       <VoteSpotlight state={state} progress={progress} />
       <VotePortal state={state} progress={progress} />
@@ -895,6 +1022,11 @@ export default function PalermoStage({
 
 [
   "crypt-large",
+  "fire-basket",
+  "fence-damaged",
+  "coffin-old",
+  "hay-bale-bundled",
+  "lantern-glass",
   "pine-crooked",
   "lightpost-single",
   "bench",

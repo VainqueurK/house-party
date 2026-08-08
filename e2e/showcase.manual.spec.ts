@@ -146,7 +146,7 @@ test("record a labeled Palermo acceptance reel", async ({ browser, baseURL }) =>
     await advance(host);
     for (const device of devices)
       await caption(device.page, "DOCTOR PROTECTION", `${firstTarget.name} was attacked, but the protection animation resolves on every screen.`);
-    await host.waitForTimeout(4800);
+    await host.waitForTimeout(7000);
 
     await advance(host);
     for (const device of devices)
@@ -165,7 +165,7 @@ test("record a labeled Palermo acceptance reel", async ({ browser, baseURL }) =>
     await advance(host);
     for (const device of devices)
       await caption(device.page, "TIED VOTE", "The town is divided. Nobody is ejected.");
-    await host.waitForTimeout(4000);
+    await host.waitForTimeout(6200);
   } finally {
     const mobileRecording = devices[1]?.page
       .video()

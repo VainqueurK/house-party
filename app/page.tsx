@@ -5,6 +5,7 @@ import type { FormEvent } from "react";
 import dynamic from "next/dynamic";
 import {
   ArrowRight,
+  CheckCircle2,
   ChevronLeft,
   Copy,
   Eye,
@@ -258,7 +259,21 @@ export default function Home() {
       return;
     if (narratedRevision.current === displayState.revision) return;
     narratedRevision.current = displayState.revision;
-    void narrator.speak(narrationFor(displayState));
+    const cinematicDelay =
+      displayState.phase === "night-result" ||
+      displayState.phase === "vote-result"
+        ? Math.max(
+            0,
+            displayState.endsAt -
+              PHASE_LENGTHS[displayState.phase] * 520 -
+              Date.now(),
+          )
+        : 0;
+    const timer = window.setTimeout(
+      () => void narrator.speak(narrationFor(displayState)),
+      cinematicDelay,
+    );
+    return () => window.clearTimeout(timer);
   }, [displayState, isHost, narrationEnabled, narrator]);
 
   function toggleNarration() {
@@ -1181,16 +1196,27 @@ function PlayerController({
       document.removeEventListener("visibilitychange", concealWhenHidden);
   }, []);
   useEffect(() => {
+    let delayedFeedback: number | undefined;
     if (state.phase === "role-reveal") playGameSound("role");
     else if (state.phase === "night") playGameSound("night");
-    else if (state.phase === "night-result") {
-      playGameSound(state.cinematic?.kind === "night" && state.cinematic.protected ? "protect" : "impact");
-      navigator.vibrate?.(state.cinematic?.kind === "night" && state.cinematic.protected ? [30, 45, 30] : [70, 35, 110]);
-    } else if (state.phase === "vote-result") {
-      playGameSound("vote");
-      navigator.vibrate?.([45, 35, 45]);
-    }
-  }, [state.cinematic, state.phase, state.revision]);
+    else if (state.phase === "night-result")
+      delayedFeedback = window.setTimeout(() => {
+        const protectedAttack =
+          state.cinematic?.kind === "night" && state.cinematic.protected;
+        playGameSound(protectedAttack ? "protect" : "impact");
+        navigator.vibrate?.(
+          protectedAttack ? [30, 45, 30] : [70, 35, 110],
+        );
+      }, Math.max(0, state.endsAt - PHASE_LENGTHS["night-result"] * 580 - Date.now()));
+    else if (state.phase === "vote-result")
+      delayedFeedback = window.setTimeout(() => {
+        playGameSound("vote");
+        navigator.vibrate?.([45, 35, 45]);
+      }, Math.max(0, state.endsAt - PHASE_LENGTHS["vote-result"] * 580 - Date.now()));
+    return () => {
+      if (delayedFeedback) window.clearTimeout(delayedFeedback);
+    };
+  }, [state.cinematic, state.endsAt, state.phase, state.revision]);
   useEffect(() => {
     setSeconds(Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000)));
     const timer = window.setInterval(
@@ -1210,6 +1236,7 @@ function PlayerController({
   const canAct =
     isAlive && (state.phase === "night" || state.phase === "voting");
   const noSharedScreen = hosting || state.screenMode === "everyone";
+  const selectedPlayer = state.players.find((player) => player.id === selected);
   const roleLabel = role
     ? role.charAt(0).toUpperCase() + role.slice(1)
     : "Your role";
@@ -1262,7 +1289,11 @@ function PlayerController({
       data-phase={state.phase}
     >
       <div className="controller-world" aria-hidden="true">
-        <PalermoStage state={state} quality="performance" />
+        <PalermoStage
+          key={state.cinematic?.id ?? "ambient"}
+          state={state}
+          quality="performance"
+        />
       </div>
       <div className="controller-vignette" />
       {(state.phase === "night-result" || state.phase === "vote-result") && (
@@ -1385,6 +1416,16 @@ function PlayerController({
                   ))}
                 </div>
               )}
+            {selectedPlayer && canAct && (
+              <div className="action-confirmation" role="status" data-testid="action-confirmation">
+                <CheckCircle2 size={22} />
+                <span>
+                  <small>{connected ? "CHOICE SENT" : "SAVED ON THIS PHONE"}</small>
+                  <strong>{selectedPlayer.name}</strong>
+                  <em>Tap another player to change it.</em>
+                </span>
+              </div>
+            )}
             <button
               type="button"
               className={`role-peek ${roleRevealed ? "revealed" : "concealed"} role-${role ?? "pending"}`}
@@ -1492,6 +1533,11 @@ function GameBoard({
   const narrating = narratorStatus === "speaking";
   const cinematic =
     state.phase === "night-result" || state.phase === "vote-result";
+  const cinematicDuration = cinematic ? PHASE_LENGTHS[state.phase] : 1;
+  const cinematicProgress = cinematic
+    ? Math.max(0, Math.min(1, (cinematicDuration - seconds) / cinematicDuration))
+    : 1;
+  const cinematicRevealed = true;
   const waitingForActions =
     requiredActionCount > 0 && actionCount < requiredActionCount && seconds > 0;
   const townIsMoving =
@@ -1517,7 +1563,13 @@ function GameBoard({
       <em>hidden.</em>
     </>
   ) : state.phase === "night-result" ? (
-    state.cinematic?.kind === "night" && state.cinematic.protected ? (
+    !cinematicRevealed ? (
+      <>
+        Something moves
+        <br />
+        <em>in the dark.</em>
+      </>
+    ) : state.cinematic?.kind === "night" && state.cinematic.protected ? (
       <>
         The attack was
         <br />
@@ -1549,7 +1601,13 @@ function GameBoard({
       <em>choice.</em>
     </>
   ) : state.phase === "vote-result" ? (
-    state.cinematic?.kind === "vote" && state.cinematic.tied ? (
+    !cinematicRevealed ? (
+      <>
+        The verdict is
+        <br />
+        <em>in.</em>
+      </>
+    ) : state.cinematic?.kind === "vote" && state.cinematic.tied ? (
       <>
         The town is
         <br />
@@ -1586,7 +1644,11 @@ function GameBoard({
       data-phase={state.phase}
       className={`game-screen game-screen-3d ${isNight ? "night-phase" : "day-phase"} ${cinematic ? "is-cinematic" : ""}`}
     >
-      <PalermoStage state={state} quality={graphicsQuality} />
+      <PalermoStage
+        key={state.cinematic?.id ?? "ambient"}
+        state={state}
+        quality={graphicsQuality}
+      />
       <div className="cinematic-shade" />
       <div className="game-status cinematic-status">
         <span className="live-pill">
@@ -1625,7 +1687,11 @@ function GameBoard({
         <div className="eyebrow">{label}</div>
         <h1>{headline}</h1>
         <p>
-          {state.resultText ??
+          {cinematic && !cinematicRevealed
+            ? state.phase === "night-result"
+              ? "Watch the doors. Palermo has not yet revealed who was chosen."
+              : "The town holds its breath while the final choice is revealed."
+            : state.resultText ??
             (state.phase === "role-reveal"
               ? "Read your private role, then hide your screen."
               : state.phase === "night"
@@ -1640,10 +1706,19 @@ function GameBoard({
                         ? "The verdict is now public. Individual votes stay secret."
                         : "The room has spoken.")}
         </p>
-        {!won && (
+        {!won && !cinematic && (
           <div className="display-timer" data-testid="phase-timer">
             {seconds}
             <small>seconds</small>
+          </div>
+        )}
+        {cinematic && (
+          <div
+            className={`cinematic-progress ${cinematicRevealed ? "revealed" : "building"}`}
+            data-testid="cinematic-progress"
+            aria-label={cinematicRevealed ? "Outcome revealed" : "Cinematic playing"}
+          >
+            <i style={{ width: `${cinematicProgress * 100}%` }} />
           </div>
         )}
         {requiredActionCount > 0 && (
@@ -1677,6 +1752,8 @@ function GameBoard({
         {!won && (
           <button
             className="phase-button"
+            data-testid="phase-button"
+            data-phase={state.phase}
             disabled={phaseBlocked}
             onClick={onAdvance}
           >
