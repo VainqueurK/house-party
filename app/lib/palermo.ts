@@ -32,6 +32,7 @@ export type PalermoState = {
   round: number;
   endsAt: number;
   players: PalermoPlayer[];
+  screenMode?: "shared" | "everyone";
   eliminatedId?: string;
   resultText?: string;
   winner?: "mafia" | "town";

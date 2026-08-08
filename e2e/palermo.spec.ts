@@ -36,8 +36,20 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
   baseURL,
 }) => {
   const origin = baseURL!;
-  const displayContext = await browser.newContext();
+  const shouldRecord = process.env.SHOWCASE_RECORD === "1";
+  const displayContext = await browser.newContext(
+    shouldRecord
+      ? {
+          viewport: { width: 1280, height: 720 },
+          recordVideo: {
+            dir: "artifacts/showcase/raw",
+            size: { width: 1280, height: 720 },
+          },
+        }
+      : undefined,
+  );
   const display = await displayContext.newPage();
+  const displayRecording = display.video();
   const devices: PlayerDevice[] = [];
 
   try {
@@ -96,6 +108,27 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
     );
     for (const device of devices)
       await expect(device.page.getByTestId("player-controller")).toBeVisible();
+
+    await expect(devices[0].page.getByTestId("role-reveal-toggle")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await devices[0].page.getByTestId("role-reveal-toggle").click();
+    await expect(devices[0].page.getByTestId("role-reveal-toggle")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await devices[0].page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(devices[0].page.getByTestId("role-reveal-toggle")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
 
     const roles = new Map<string, string>();
     for (const device of devices) {
@@ -247,6 +280,10 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
   } finally {
     for (const device of devices) await device.context.close();
     await displayContext.close();
+    if (shouldRecord)
+      await displayRecording?.saveAs(
+        "artifacts/showcase/raw/final-chapter.webm",
+      );
   }
 });
 

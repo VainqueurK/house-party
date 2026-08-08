@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint app --ext .ts,.tsx",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "record:showcase": "playwright test --config=playwright.showcase.config.ts && SHOWCASE_RECORD=1 playwright test e2e/palermo.spec.ts --grep 'TV display and five' --retries=0 && node scripts/build-showcase.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "3.8.1",

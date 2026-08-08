@@ -7,6 +7,8 @@ import {
   ArrowRight,
   ChevronLeft,
   Copy,
+  Eye,
+  EyeOff,
   Mic2,
   Moon,
   Play,
@@ -391,6 +393,7 @@ export default function Home() {
       round: 1,
       endsAt: Date.now() + PHASE_LENGTHS["role-reveal"] * 1000,
       players: roster,
+      screenMode: mode === "host-player" ? "everyone" : "shared",
     });
     setView("game");
   }
@@ -1161,10 +1164,22 @@ function PlayerController({
   connected: boolean;
 }) {
   const [selected, setSelected] = useState("");
+  const [roleRevealed, setRoleRevealed] = useState(false);
   const [seconds, setSeconds] = useState(
     Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000)),
   );
-  useEffect(() => setSelected(""), [state.phase, state.round]);
+  useEffect(() => {
+    setSelected("");
+    setRoleRevealed(false);
+  }, [state.phase, state.round]);
+  useEffect(() => {
+    const concealWhenHidden = () => {
+      if (document.visibilityState === "hidden") setRoleRevealed(false);
+    };
+    document.addEventListener("visibilitychange", concealWhenHidden);
+    return () =>
+      document.removeEventListener("visibilitychange", concealWhenHidden);
+  }, []);
   useEffect(() => {
     if (state.phase === "role-reveal") playGameSound("role");
     else if (state.phase === "night") playGameSound("night");
@@ -1194,6 +1209,7 @@ function PlayerController({
     state.players.find((player) => player.id === playerId)?.alive ?? false;
   const canAct =
     isAlive && (state.phase === "night" || state.phase === "voting");
+  const noSharedScreen = hosting || state.screenMode === "everyone";
   const roleLabel = role
     ? role.charAt(0).toUpperCase() + role.slice(1)
     : "Your role";
@@ -1270,7 +1286,6 @@ function PlayerController({
               ? "⚖"
               : "☀"}
         </div>
-        <div className="eyebrow">YOUR PRIVATE HUD</div>
         {!connected && (
           <div className="recovery-banner" role="status">
             Your game is safe. Choices are saved on this device and will send
@@ -1278,21 +1293,34 @@ function PlayerController({
           </div>
         )}
         {state.phase === "role-reveal" ? (
-          <>
-            <div className="role-badge" data-testid="private-role">
-              {roleLabel}
-            </div>
-            <h1>
-              Keep your
-              <br />
-              <em>secret.</em>
-            </h1>
-            <p>
-              {role
-                ? roleCopy[role]
-                : "Your private role is being dealt. Keep it hidden from the room."}
-            </p>
-          </>
+          <button
+            type="button"
+            className={`role-card-game ${roleRevealed ? "revealed" : "concealed"} role-${role ?? "pending"}`}
+            data-testid="role-reveal-toggle"
+            aria-pressed={roleRevealed}
+            aria-label={roleRevealed ? "Hide your role" : "Reveal your role"}
+            onClick={() => {
+              unlockGameAudio();
+              playGameSound("select");
+              navigator.vibrate?.(20);
+              setRoleRevealed((current) => !current);
+            }}
+          >
+            <span className="role-card-suit">♠</span>
+            <span className="role-card-content">
+              <small>YOUR ROLE</small>
+              <strong data-testid="private-role">{roleLabel}</strong>
+              <span>
+                {role
+                  ? roleCopy[role]
+                  : "Your role is still being dealt."}
+              </span>
+            </span>
+            <span className="role-card-reveal">
+              {roleRevealed ? <EyeOff size={20} /> : <Eye size={20} />}
+              {roleRevealed ? "Hide role" : "Reveal role"}
+            </span>
+          </button>
         ) : state.phase === "won" ? (
           <>
             <h1>{state.winner === "town" ? "Town wins." : "Mafia wins."}</h1>
@@ -1317,19 +1345,19 @@ function PlayerController({
                 <>
                   Look up at
                   <br />
-                  <em>{hosting ? "the group." : "the TV."}</em>
+                  <em>{noSharedScreen ? "the group." : "the TV."}</em>
                 </>
               )}
             </h1>
             <p>
               {state.phase === "night" && role !== "villager"
-                ? hosting
+                ? noSharedScreen
                   ? "Choose privately below. Your laptop will narrate when the night is over."
                   : "Choose your action below. The TV will tell you when the night is over."
                 : state.phase === "voting"
                   ? "Tap one player to cast your vote. You can change it before time runs out."
                   : (state.resultText ??
-                    (hosting
+                    (noSharedScreen
                       ? "Keep your role private, listen to the narration, and talk face to face."
                       : "The shared screen is guiding Palermo. Keep this phone nearby."))}
             </p>
@@ -1357,6 +1385,28 @@ function PlayerController({
                   ))}
                 </div>
               )}
+            <button
+              type="button"
+              className={`role-peek ${roleRevealed ? "revealed" : "concealed"} role-${role ?? "pending"}`}
+              data-testid="role-reveal-toggle"
+              aria-pressed={roleRevealed}
+              aria-label={roleRevealed ? "Hide your role" : "Reveal your role"}
+              onClick={() => {
+                unlockGameAudio();
+                playGameSound("select");
+                navigator.vibrate?.(20);
+                setRoleRevealed((current) => !current);
+              }}
+            >
+              <span className="role-peek-icon">
+                {roleRevealed ? <EyeOff size={20} /> : <Eye size={20} />}
+              </span>
+              <span className="role-peek-copy">
+                <small>{roleRevealed ? "TAP TO CONCEAL" : "TAP TO PEEK"}</small>
+                <strong data-testid="private-role">{roleLabel}</strong>
+                {roleRevealed && role && <span>{roleCopy[role]}</span>}
+              </span>
+            </button>
             {state.phase === "night" && role === "villager" && (
               <div className="controller-status">
                 ☾ You have no night action. Keep your role hidden and listen.

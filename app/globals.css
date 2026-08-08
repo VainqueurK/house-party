@@ -1341,6 +1341,165 @@ em {
   color: rgba(255, 248, 235, 0.74);
   font-size: 15px;
 }
+.role-card-game,
+.role-peek {
+  --role-accent: #ffc85c;
+  width: 100%;
+  color: #fff8eb;
+  border: 1px solid color-mix(in srgb, var(--role-accent), transparent 48%);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.role-card-game.role-mafia,
+.role-peek.role-mafia { --role-accent: #ff655b; }
+.role-card-game.role-doctor,
+.role-peek.role-doctor { --role-accent: #69dcaa; }
+.role-card-game.role-detective,
+.role-peek.role-detective { --role-accent: #79b9ff; }
+.role-card-game.role-villager,
+.role-peek.role-villager { --role-accent: #ffd06a; }
+.role-card-game {
+  position: relative;
+  isolation: isolate;
+  min-height: 330px;
+  display: grid;
+  place-items: center;
+  padding: 38px 28px 26px;
+  overflow: hidden;
+  border-radius: 22px;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--role-accent), transparent 83%), transparent 48%),
+    repeating-linear-gradient(135deg, rgba(255,255,255,.025) 0 2px, transparent 2px 11px),
+    #0d0e20;
+  box-shadow:
+    inset 0 0 0 5px #0d0e20,
+    inset 0 0 0 6px color-mix(in srgb, var(--role-accent), transparent 66%),
+    0 20px 55px rgba(0,0,0,.38);
+  transition: transform .28s cubic-bezier(.2,.9,.2,1), border-color .25s, box-shadow .25s;
+}
+.role-card-game:active { transform: scale(.985); }
+.role-card-game:focus-visible,
+.role-peek:focus-visible {
+  outline: 3px solid #fff8eb;
+  outline-offset: 3px;
+}
+.role-card-suit {
+  position: absolute;
+  inset: 20px auto auto 22px;
+  color: var(--role-accent);
+  font: 700 30px Georgia, serif;
+}
+.role-card-suit::after {
+  content: "♠";
+  position: absolute;
+  right: calc(-100vw + 70px);
+  bottom: calc(-330px + 76px);
+  transform: rotate(180deg);
+}
+.role-card-content {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  max-width: 380px;
+  transition: filter .24s ease, opacity .24s ease, transform .24s ease;
+}
+.role-card-content small,
+.role-peek-copy small {
+  color: var(--role-accent);
+  font: 900 10px var(--font-sans);
+  letter-spacing: 2.2px;
+}
+.role-card-content strong {
+  color: #fffaf0;
+  font: 700 clamp(45px, 13vw, 72px)/.92 Georgia, serif;
+  letter-spacing: -2.5px;
+}
+.role-card-content > span {
+  color: rgba(255,248,235,.72);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.role-card-game.concealed .role-card-content {
+  filter: blur(15px);
+  opacity: .2;
+  transform: scale(.94);
+  user-select: none;
+}
+.role-card-game.concealed::after {
+  content: "ROLE CONCEALED";
+  position: absolute;
+  left: 50%;
+  top: 47%;
+  transform: translate(-50%, -50%);
+  color: rgba(255,248,235,.48);
+  font: 900 10px var(--font-sans);
+  letter-spacing: 2.5px;
+}
+.role-card-reveal {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 0 18px;
+  border-radius: 999px;
+  color: #111323;
+  background: var(--role-accent);
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--role-accent), transparent 72%);
+  font-size: 12px;
+  font-weight: 900;
+}
+.role-peek {
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 11px;
+  align-items: center;
+  margin-top: 18px;
+  padding: 9px 13px;
+  border-radius: 14px;
+  text-align: left;
+  background: color-mix(in srgb, var(--role-accent), transparent 90%);
+  transition: background .2s, transform .2s;
+}
+.role-peek:active { transform: scale(.985); }
+.role-peek-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  color: #111323;
+  background: var(--role-accent);
+}
+.role-peek-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.role-peek-copy strong {
+  color: #fff8eb;
+  font: 700 22px/1 Georgia, serif;
+  transition: filter .2s, opacity .2s;
+}
+.role-peek-copy > span {
+  margin-top: 4px;
+  color: rgba(255,248,235,.68);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.role-peek.concealed .role-peek-copy strong {
+  filter: blur(9px);
+  opacity: .28;
+  user-select: none;
+}
 .recovery-banner {
   margin: 12px 0 4px;
   padding: 11px 13px;
@@ -1430,6 +1589,11 @@ em {
   .controller-card.controller-hud-panel h1 {
     margin: 10px 0;
   }
+  .role-card-game {
+    min-height: min(390px, 51dvh);
+    padding: 30px 20px 24px;
+  }
+  .role-card-content strong { font-size: clamp(42px, 14vw, 62px); }
   .controller-targets {
     gap: 8px;
     margin-top: 16px;
