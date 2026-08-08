@@ -24,6 +24,7 @@ import {
   type RoomPlayer,
 } from "./lib/use-room-sync";
 import { useNarrator } from "./lib/use-narrator";
+import { playGameSound, unlockGameAudio } from "./lib/game-audio";
 import {
   assignRoles,
   PHASE_LENGTHS,
@@ -37,6 +38,7 @@ import {
 
 type Avatar = { name: string; emoji: string; color: string; status?: string };
 type GraphicsQuality = "cinematic" | "performance";
+type RoomMode = "player" | "display" | "host-player";
 
 const PalermoStage = dynamic(() => import("./components/palermo-stage"), {
   ssr: false,
@@ -80,7 +82,8 @@ export default function Home() {
   const [code, setCode] = useState("PINE-42");
   const [copied, setCopied] = useState(false);
   const [night, setNight] = useState(false);
-  const [mode, setMode] = useState<"player" | "display">("player");
+  const [mode, setMode] = useState<RoomMode>("player");
+  const [creatingPlayableRoom, setCreatingPlayableRoom] = useState(false);
   const [displayState, setDisplayState] = useState<PalermoState | null>(null);
   const [roles, setRoles] = useState<PalermoRoles>({});
   const [narrationEnabled, setNarrationEnabled] = useState(true);
@@ -102,6 +105,15 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (
+      process.env.NODE_ENV === "production" &&
+      "serviceWorker" in navigator
+    ) {
+      void navigator.serviceWorker.register("/sw.js");
+    }
+  }, []);
+
+  useEffect(() => {
     const roomFromLink = new URLSearchParams(window.location.search).get(
       "room",
     );
@@ -113,19 +125,19 @@ export default function Home() {
           const session = JSON.parse(saved) as {
             code: string;
             name: string;
-            mode: "player" | "display";
+            mode: RoomMode;
             view: "lobby" | "game";
           };
           if (
             session.code === roomFromLink.toUpperCase() &&
-            (session.mode === "player" ||
+            (session.mode !== "display" ||
               new URLSearchParams(window.location.search).get("display") ===
                 "1")
           ) {
             setName(session.name);
             setMode(session.mode);
             setView(session.view);
-            if (session.mode === "display") {
+            if (session.mode !== "player") {
               const state = localStorage.getItem(
                 `house-party:display-state:${session.code}`,
               );
@@ -157,10 +169,13 @@ export default function Home() {
     enabled: view === "lobby" || view === "game",
     role: mode,
   });
+  const isHost = mode === "display" || mode === "host-player";
+  const isPlayer = mode === "player" || mode === "host-player";
+  const { sendPrivateRole } = sync;
 
   useEffect(() => {
-    if (mode === "player" && sync.gameState) setView("game");
-  }, [mode, sync.gameState]);
+    if (isPlayer && sync.gameState) setView("game");
+  }, [isPlayer, sync.gameState]);
 
   useEffect(() => {
     if (view !== "lobby" && view !== "game") return;
@@ -171,7 +186,7 @@ export default function Home() {
   }, [code, mode, name, view]);
 
   useEffect(() => {
-    if (mode !== "display" || !displayState) return;
+    if (!isHost || !displayState) return;
     localStorage.setItem(
       `house-party:display-state:${code}`,
       JSON.stringify(displayState),
@@ -180,17 +195,29 @@ export default function Home() {
       `house-party:display-roles:${code}`,
       JSON.stringify(roles),
     );
-  }, [code, displayState, mode, roles]);
+  }, [code, displayState, isHost, roles]);
 
   useEffect(() => {
-    if (mode !== "display" || !sync.syncRequests.length) return;
+    if (!isHost || !sync.syncRequests.length) return;
     const requesterIds = [...new Set(sync.syncRequests)];
     requesterIds.forEach((id) => {
       if (displayState) void sync.sendGameState(displayState);
       if (roles[id]) void sync.sendPrivateRole(id, roles[id]);
     });
     sync.clearSyncRequests();
-  }, [displayState, mode, roles, sync]);
+  }, [displayState, isHost, roles, sync]);
+
+  useEffect(() => {
+    if (!isHost || displayState?.phase !== "role-reveal") return;
+    const resendRoles = () => {
+      for (const player of displayState.players) {
+        const role = roles[player.id];
+        if (role) void sendPrivateRole(player.id, role);
+      }
+    };
+    const timer = window.setInterval(resendRoles, 1800);
+    return () => window.clearInterval(timer);
+  }, [displayState, isHost, roles, sendPrivateRole]);
 
   useEffect(() => {
     if (!sync.roomClosed) return;
@@ -217,11 +244,11 @@ export default function Home() {
         ? []
         : demoPlayers;
 
-  const gameState = mode === "display" ? displayState : sync.gameState;
+  const gameState = isHost ? displayState : sync.gameState;
 
   useEffect(() => {
     if (
-      mode !== "display" ||
+      !isHost ||
       !displayState ||
       !narrationEnabled ||
       (narrator.status !== "ready" && narrator.status !== "fallback")
@@ -230,7 +257,7 @@ export default function Home() {
     if (narratedRevision.current === displayState.revision) return;
     narratedRevision.current = displayState.revision;
     void narrator.speak(narrationFor(displayState));
-  }, [displayState, mode, narrationEnabled, narrator]);
+  }, [displayState, isHost, narrationEnabled, narrator]);
 
   function toggleNarration() {
     const next = !narrationEnabled;
@@ -249,27 +276,50 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (mode !== "display" || !displayState || displayState.phase === "won")
+    if (!isHost || !displayState || displayState.phase === "won")
       return;
+    const phaseActions = sync.actions.filter(
+      (action) =>
+        action.round === displayState.round &&
+        action.phase === displayState.phase,
+    );
+    const received = new Set(phaseActions.map((action) => action.playerId)).size;
+    const expected =
+      displayState.phase === "night"
+        ? displayState.players.filter(
+            (player) => player.alive && roles[player.id] !== "villager",
+          ).length
+        : displayState.phase === "voting"
+          ? displayState.players.filter((player) => player.alive).length
+          : 0;
+    // On unreliable networks, never auto-resolve a choice phase while a
+    // controller may still be reconnecting. The host can continue manually
+    // once the visible timer has elapsed.
+    if (expected > received) return;
     const wait = Math.max(200, displayState.endsAt - Date.now());
     const timer = window.setTimeout(() => advanceGame(), wait);
     return () => window.clearTimeout(timer);
     // The display state is the timer source of truth.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayState, mode]);
+  }, [displayState, isHost, roles, sync.actions]);
 
   function publishGameState(next: PalermoState) {
     setDisplayState(next);
     void sync.sendGameState(next);
   }
 
-  function createRoom() {
+  function newRoomCode() {
     const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
     const word = Array.from(
       { length: 4 },
       () => letters[Math.floor(Math.random() * letters.length)],
     ).join("");
-    const nextCode = `${word}-${Math.floor(10 + Math.random() * 90)}`;
+    return `${word}-${Math.floor(10 + Math.random() * 90)}`;
+  }
+
+  function createRoom() {
+    const nextCode = newRoomCode();
+    setCreatingPlayableRoom(false);
     setCode(nextCode);
     setMode("display");
     setName("");
@@ -280,8 +330,21 @@ export default function Home() {
     history.replaceState({}, "", `/?room=${nextCode}&display=1`);
   }
 
+  function preparePlayableRoom() {
+    const nextCode = newRoomCode();
+    setCreatingPlayableRoom(true);
+    setCode(nextCode);
+    setName("");
+    setMode("host-player");
+    setDisplayState(null);
+    setRoles({});
+    setView("join");
+    history.replaceState({}, "", `/?room=${nextCode}`);
+  }
+
   function joinRoom() {
-    setMode("player");
+    unlockGameAudio();
+    if (!creatingPlayableRoom) setMode("player");
     setView("lobby");
     history.replaceState({}, "", `/?room=${code.toUpperCase()}`);
   }
@@ -289,7 +352,7 @@ export default function Home() {
   function leaveRoom() {
     const finishLeaving = () => {
       localStorage.removeItem("house-party:session");
-      if (mode === "display") {
+      if (isHost) {
         localStorage.removeItem(`house-party:display-state:${code}`);
         localStorage.removeItem(`house-party:display-roles:${code}`);
       }
@@ -298,14 +361,14 @@ export default function Home() {
       setRoles({});
       setView("home");
     };
-    if (mode === "display") {
+    if (isHost) {
       void sync.closeRoom();
       window.setTimeout(finishLeaving, 250);
     } else finishLeaving();
   }
 
   async function startPalermo() {
-    if (mode !== "display") return;
+    if (!isHost) return;
     const roster = sync.players.map((player) => ({
       id: player.id,
       name: player.name,
@@ -349,7 +412,7 @@ export default function Home() {
   }
 
   function advanceGame() {
-    if (mode !== "display" || !displayState) return;
+    if (!isHost || !displayState) return;
     if (advancedRevision.current === displayState.revision) return;
     advancedRevision.current = displayState.revision;
     const now = Date.now();
@@ -563,10 +626,19 @@ export default function Home() {
                 and one very dramatic narrator.
               </p>
               <div className="hero-actions">
-                <button className="primary-button" onClick={createRoom}>
-                  Create a room <ArrowRight size={17} />
+                <button className="primary-button" onClick={preparePlayableRoom}>
+                  Create &amp; play <ArrowRight size={17} />
                 </button>
-                <button className="text-button" onClick={() => setView("join")}>
+                <button className="text-button" onClick={createRoom}>
+                  Use a shared screen
+                </button>
+                <button
+                  className="text-button"
+                  onClick={() => {
+                    setCreatingPlayableRoom(false);
+                    setView("join");
+                  }}
+                >
                   Join with a code
                 </button>
               </div>
@@ -658,6 +730,7 @@ export default function Home() {
           setCode={setCode}
           name={name}
           setName={setName}
+          creatingRoom={creatingPlayableRoom}
           onBack={() => {
             history.replaceState({}, "", "/");
             setView("home");
@@ -673,6 +746,8 @@ export default function Home() {
           sendChat={sync.sendChat}
           connected={sync.connected}
           displayMode={mode === "display"}
+          hostMode={isHost}
+          playingHost={mode === "host-player"}
           narrationEnabled={narrationEnabled}
           narratorStatus={narrator.status}
           narratorProgress={narrator.progress}
@@ -715,6 +790,12 @@ export default function Home() {
             role={sync.myRole}
             investigationResult={sync.investigationResult}
             onAction={sync.sendAction}
+            hosting={mode === "host-player"}
+            actionCount={actionCount}
+            requiredActionCount={requiredActionCount}
+            onAdvance={advancePhase}
+            onSpeak={speak}
+            connected={sync.connected}
           />
         ))}
     </main>
@@ -726,6 +807,7 @@ function JoinScreen({
   setCode,
   name,
   setName,
+  creatingRoom,
   onBack,
   onJoin,
 }: {
@@ -733,6 +815,7 @@ function JoinScreen({
   setCode: (v: string) => void;
   name: string;
   setName: (v: string) => void;
+  creatingRoom: boolean;
   onBack: () => void;
   onJoin: () => void;
 }) {
@@ -743,11 +826,13 @@ function JoinScreen({
       </button>
       <div className="form-card">
         <div className="form-icon">✦</div>
-        <div className="eyebrow">STEP INTO THE ROOM</div>
+        <div className="eyebrow">
+          {creatingRoom ? "START A PLAYER ROOM" : "STEP INTO THE ROOM"}
+        </div>
         <h2>
-          Who are you
+          {creatingRoom ? "You’re playing" : "Who are you"}
           <br />
-          <em>tonight?</em>
+          <em>{creatingRoom ? "this time." : "tonight?"}</em>
         </h2>
         <label>
           Your name
@@ -770,7 +855,8 @@ function JoinScreen({
           disabled={!name.trim()}
           onClick={onJoin}
         >
-          Join the room <ArrowRight size={17} />
+          {creatingRoom ? "Create player room" : "Join the room"}{" "}
+          <ArrowRight size={17} />
         </button>
       </div>
     </section>
@@ -784,6 +870,8 @@ function Lobby({
   sendChat,
   connected,
   displayMode,
+  hostMode,
+  playingHost,
   narrationEnabled,
   narratorStatus,
   narratorProgress,
@@ -802,6 +890,8 @@ function Lobby({
   sendChat: (text: string) => Promise<void>;
   connected: boolean;
   displayMode: boolean;
+  hostMode: boolean;
+  playingHost: boolean;
   narrationEnabled: boolean;
   narratorStatus: import("./lib/use-narrator").NarratorStatus;
   narratorProgress: number;
@@ -829,7 +919,11 @@ function Lobby({
       <div className="lobby-top">
         <div>
           <div className="eyebrow">
-            {displayMode ? "SHARED SCREEN MODE" : "PALERMO CONTROLLER"}
+            {displayMode
+              ? "SHARED SCREEN MODE"
+              : playingHost
+                ? "EVERYONE PLAYS MODE"
+                : "PALERMO CONTROLLER"}
           </div>
           <h2>
             {displayMode ? (
@@ -837,6 +931,12 @@ function Lobby({
                 Put us
                 <br />
                 <em>on the TV.</em>
+              </>
+            ) : playingHost ? (
+              <>
+                You&apos;re hosting
+                <br />
+                <em>and playing.</em>
               </>
             ) : (
               <>
@@ -890,14 +990,20 @@ function Lobby({
             <span>✦</span>{" "}
             {displayMode
               ? "Share this code on the big screen. Everyone else joins from their phone."
+              : playingHost
+                ? "Share the code. Your laptop runs the game and joins as a private player."
               : "Keep this screen open. The big screen will guide the game."}
           </div>
         </div>
         <div className="settings-card">
           <div className="card-title">
-            <span>{displayMode ? "Display settings" : "Your controller"}</span>
+            <span>{hostMode ? "Game settings" : "Your controller"}</span>
             <span className="host-tag">
-              {displayMode ? "NARRATOR SCREEN" : "MOBILE PLAYER"}
+              {displayMode
+                ? "NARRATOR SCREEN"
+                : playingHost
+                  ? "HOST + PLAYER"
+                  : "MOBILE PLAYER"}
             </span>
           </div>
           <div className="setting-row">
@@ -908,7 +1014,7 @@ function Lobby({
           </div>
           <div className="setting-row">
             <span>Narration</span>
-            {displayMode ? (
+            {hostMode ? (
               <div className="setting-control-stack">
                 <button
                   className="setting-switch"
@@ -953,7 +1059,7 @@ function Lobby({
           </div>
           <div className="setting-row">
             <span>3D quality</span>
-            {displayMode ? (
+            {hostMode ? (
               <button
                 className="quality-toggle"
                 data-testid="graphics-quality"
@@ -969,7 +1075,7 @@ function Lobby({
             <span>Rounds</span>
             <strong>Until the last secret</strong>
           </div>
-          {displayMode ? (
+          {hostMode ? (
             <button
               data-testid="start-game"
               className="primary-button full"
@@ -986,7 +1092,7 @@ function Lobby({
           <small className="min-players">
             {players.length < 4
               ? `Need ${4 - players.length} more players to start`
-              : displayMode
+              : hostMode
                 ? "Everyone's in. Let’s make some questionable choices."
                 : "Look up at the TV when the game begins."}
           </small>
@@ -1035,15 +1141,50 @@ function PlayerController({
   role,
   investigationResult,
   onAction,
+  hosting,
+  actionCount,
+  requiredActionCount,
+  onAdvance,
+  onSpeak,
+  connected,
 }: {
   state: PalermoState;
   playerId: string;
   role: import("./lib/palermo").PalermoRole | null;
   investigationResult: import("./lib/use-room-sync").InvestigationResult | null;
   onAction: (action: import("./lib/use-room-sync").GameAction) => Promise<void>;
+  hosting: boolean;
+  actionCount: number;
+  requiredActionCount: number;
+  onAdvance: () => void;
+  onSpeak: () => void;
+  connected: boolean;
 }) {
   const [selected, setSelected] = useState("");
+  const [seconds, setSeconds] = useState(
+    Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000)),
+  );
   useEffect(() => setSelected(""), [state.phase, state.round]);
+  useEffect(() => {
+    if (state.phase === "role-reveal") playGameSound("role");
+    else if (state.phase === "night") playGameSound("night");
+    else if (state.phase === "night-result") {
+      playGameSound(state.cinematic?.kind === "night" && state.cinematic.protected ? "protect" : "impact");
+      navigator.vibrate?.(state.cinematic?.kind === "night" && state.cinematic.protected ? [30, 45, 30] : [70, 35, 110]);
+    } else if (state.phase === "vote-result") {
+      playGameSound("vote");
+      navigator.vibrate?.([45, 35, 45]);
+    }
+  }, [state.cinematic, state.phase, state.revision]);
+  useEffect(() => {
+    setSeconds(Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000)));
+    const timer = window.setInterval(
+      () =>
+        setSeconds(Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000))),
+      250,
+    );
+    return () => window.clearInterval(timer);
+  }, [state.endsAt]);
   const alive = state.players.filter(
     (player) =>
       player.alive &&
@@ -1065,21 +1206,28 @@ function PlayerController({
     villager: "Read the room, trust your instincts, and find the mafia by day.",
   };
   async function choose(targetId: string) {
-    if (state.phase === "night" && role && role !== "villager")
-      await onAction({
-        kind: role,
-        targetId,
-        round: state.round,
-        phase: state.phase,
-      });
-    if (state.phase === "voting")
-      await onAction({
-        kind: "vote",
-        targetId,
-        round: state.round,
-        phase: state.phase,
-      });
     setSelected(targetId);
+    playGameSound("select");
+    navigator.vibrate?.(24);
+    try {
+      if (state.phase === "night" && role && role !== "villager")
+        await onAction({
+          kind: role,
+          targetId,
+          round: state.round,
+          phase: state.phase,
+        });
+      if (state.phase === "voting")
+        await onAction({
+          kind: "vote",
+          targetId,
+          round: state.round,
+          phase: state.phase,
+        });
+    } catch {
+      // The choice is persisted before broadcast and will be replayed when the
+      // device reconnects. Keep the acknowledgement visible to the player.
+    }
   }
   if (
     role === "detective" &&
@@ -1092,8 +1240,29 @@ function PlayerController({
     };
   }
   return (
-    <section className="controller-screen wrap" data-testid="player-controller">
-      <div className="controller-card">
+    <section
+      className={`controller-screen game-controller ${state.phase.includes("night") || state.phase === "role-reveal" ? "night" : "day"}`}
+      data-testid="player-controller"
+      data-phase={state.phase}
+    >
+      <div className="controller-world" aria-hidden="true">
+        <PalermoStage state={state} quality="performance" />
+      </div>
+      <div className="controller-vignette" />
+      {(state.phase === "night-result" || state.phase === "vote-result") && (
+        <div
+          className={`controller-event-flash ${state.phase}`}
+          key={`event-${state.revision}`}
+        />
+      )}
+      <div className="controller-hud-bar">
+        <span className="hud-brand">PALERMO</span>
+        <span className="hud-round">ROUND {state.round}</span>
+        <span className={`hud-connection ${connected ? "online" : "offline"}`}>
+          <i /> {connected ? state.phase.replace("-", " ").toUpperCase() : "RECONNECTING"}
+        </span>
+      </div>
+      <div className="controller-card controller-hud-panel">
         <div className="phase-symbol">
           {state.phase === "night"
             ? "☾"
@@ -1101,9 +1270,13 @@ function PlayerController({
               ? "⚖"
               : "☀"}
         </div>
-        <div className="eyebrow">
-          ROUND {state.round} · {state.phase.replace("-", " ").toUpperCase()}
-        </div>
+        <div className="eyebrow">YOUR PRIVATE HUD</div>
+        {!connected && (
+          <div className="recovery-banner" role="status">
+            Your game is safe. Choices are saved on this device and will send
+            when the connection returns.
+          </div>
+        )}
         {state.phase === "role-reveal" ? (
           <>
             <div className="role-badge" data-testid="private-role">
@@ -1144,17 +1317,21 @@ function PlayerController({
                 <>
                   Look up at
                   <br />
-                  <em>the TV.</em>
+                  <em>{hosting ? "the group." : "the TV."}</em>
                 </>
               )}
             </h1>
             <p>
               {state.phase === "night" && role !== "villager"
-                ? "Choose your action below. The TV will tell you when the night is over."
+                ? hosting
+                  ? "Choose privately below. Your laptop will narrate when the night is over."
+                  : "Choose your action below. The TV will tell you when the night is over."
                 : state.phase === "voting"
                   ? "Tap one player to cast your vote. You can change it before time runs out."
                   : (state.resultText ??
-                    "The shared screen is guiding Palermo. Keep this phone nearby.")}
+                    (hosting
+                      ? "Keep your role private, listen to the narration, and talk face to face."
+                      : "The shared screen is guiding Palermo. Keep this phone nearby."))}
             </p>
             {canAct &&
               ((state.phase === "night" && role !== "villager") ||
@@ -1182,10 +1359,38 @@ function PlayerController({
               )}
             {state.phase === "night" && role === "villager" && (
               <div className="controller-status">
-                ☾ You are safe in the night. Watch the TV.
+                ☾ You have no night action. Keep your role hidden and listen.
               </div>
             )}
           </>
+        )}
+        {hosting && state.phase !== "won" && (
+          <div className="compact-host-controls" data-testid="host-controls">
+            <div>
+              <span>HOST CONTROLS</span>
+              <strong>{seconds}s</strong>
+              {requiredActionCount > 0 && (
+                <small>
+                  {actionCount}/{requiredActionCount} choices in
+                </small>
+              )}
+            </div>
+            <button type="button" className="text-button" onClick={onSpeak}>
+              <Volume2 size={15} /> Repeat
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={onAdvance}
+              disabled={
+                requiredActionCount > 0 &&
+                actionCount < requiredActionCount &&
+                seconds > 0
+              }
+            >
+              {seconds > 0 ? "Skip timer" : "Continue"}
+            </button>
+          </div>
         )}
       </div>
     </section>

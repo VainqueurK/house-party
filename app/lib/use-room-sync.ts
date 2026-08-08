@@ -58,7 +58,7 @@ export function useRoomSync({
   code: string;
   name: string;
   enabled: boolean;
-  role: "player" | "display";
+  role: "player" | "display" | "host-player";
 }) {
   const channelRef = useRef<RealtimeChannel | null>(null);
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
@@ -89,7 +89,7 @@ export function useRoomSync({
   }, [name, playerId]);
 
   useEffect(() => {
-    if (!code || role !== "player") return;
+    if (!code || role === "display") return;
     const savedRole = localStorage.getItem(
       storageKey("role", code),
     ) as PalermoRole | null;
@@ -117,11 +117,15 @@ export function useRoomSync({
   }, [code, role]);
 
   useEffect(() => {
-    if (!enabled || !supabase || !code || (role === "player" && !name)) return;
+    const isHost = role === "display" || role === "host-player";
+    const isPlayer = role === "player" || role === "host-player";
+    if (!enabled || !supabase || !code || (isPlayer && !name)) return;
     setRoomClosed(false);
     let mainReady = false;
-    let privateReady = role === "display";
+    let privateReady = !isPlayer;
     let closed = false;
+    let requestedRoleRevision = 0;
+    let presenceTracked = false;
     const roomCode = code.toUpperCase();
     const channel = supabase.channel(`room:${roomCode}`, {
       config: {
@@ -134,12 +138,42 @@ export function useRoomSync({
     channelRef.current = channel;
 
     const requestSync = async () => {
-      if (role !== "player" || !mainReady || !privateReady || closed) return;
+      if (!isPlayer || !mainReady || !privateReady || closed) return;
       await channel.send({
         type: "broadcast",
         event: "sync-request",
         payload: { playerId, nonce: crypto.randomUUID() },
       });
+    };
+
+    const trackPlayerWhenReady = async () => {
+      if (
+        !isPlayer ||
+        !mainReady ||
+        !privateReady ||
+        presenceTracked ||
+        closed
+      )
+        return;
+      presenceTracked = true;
+      await channel.track({ id: playerId, name, ...profile });
+      void requestSync();
+    };
+
+    const replayPendingAction = () => {
+      if (!isPlayer || !mainReady || closed) return;
+      const saved = localStorage.getItem(storageKey("action", roomCode));
+      if (!saved) return;
+      try {
+        const action = JSON.parse(saved) as GameAction;
+        void channel.send({
+          type: "broadcast",
+          event: "game-action",
+          payload: { ...action, playerId },
+        });
+      } catch {
+        localStorage.removeItem(storageKey("action", roomCode));
+      }
     };
 
     channel
@@ -161,21 +195,53 @@ export function useRoomSync({
         if (payload?.id && payload?.name && payload?.text)
           setChat((current) => [...current.slice(-39), payload as RoomChat]);
       })
+      .on("broadcast", { event: "private-role" }, ({ payload }) => {
+        if (!isPlayer || payload?.targetId !== playerId || !payload?.role)
+          return;
+        setMyRole(payload.role as PalermoRole);
+        localStorage.setItem(
+          storageKey("role", roomCode),
+          payload.role as string,
+        );
+      })
+      .on("broadcast", { event: "investigation-result" }, ({ payload }) => {
+        if (
+          !isPlayer ||
+          payload?.targetId !== playerId ||
+          typeof payload?.round !== "number" ||
+          !payload?.targetName
+        )
+          return;
+        const result = payload as InvestigationResult;
+        setInvestigationResult(result);
+        localStorage.setItem(
+          storageKey("investigation", roomCode),
+          JSON.stringify(result),
+        );
+      })
       .on("broadcast", { event: "game-state" }, ({ payload }) => {
         const state = payload as PalermoState;
         if (!state?.phase) return;
         setGameState((current) => {
           if ((current?.revision ?? 0) > (state.revision ?? 0)) return current;
-          if (role === "player")
+          if (isPlayer)
             localStorage.setItem(
               storageKey("state", roomCode),
               JSON.stringify(state),
             );
           return state;
         });
+        if (
+          isPlayer &&
+          state.phase === "role-reveal" &&
+          state.revision > requestedRoleRevision
+        ) {
+          requestedRoleRevision = state.revision;
+          window.setTimeout(() => void requestSync(), 200);
+        }
       })
       .on("broadcast", { event: "game-action" }, ({ payload }) => {
-        if (role === "display" && payload?.playerId)
+        if (isHost && payload?.playerId)
           setActions((current) => {
             const action = payload as GameAction;
             return [
@@ -189,7 +255,7 @@ export function useRoomSync({
           });
       })
       .on("broadcast", { event: "action-sync-request" }, () => {
-        if (role !== "player") return;
+        if (!isPlayer) return;
         const saved = localStorage.getItem(storageKey("action", roomCode));
         if (!saved) return;
         try {
@@ -204,14 +270,14 @@ export function useRoomSync({
         }
       })
       .on("broadcast", { event: "sync-request" }, ({ payload }) => {
-        if (role === "display" && payload?.playerId)
+        if (isHost && payload?.playerId)
           setSyncRequests((current) => [
             ...current.slice(-19),
             payload.playerId as string,
           ]);
       })
       .on("broadcast", { event: "room-closed" }, () => {
-        if (role === "player") {
+        if (isPlayer && !isHost) {
           localStorage.removeItem(storageKey("state", roomCode));
           localStorage.removeItem(storageKey("role", roomCode));
           localStorage.removeItem(storageKey("action", roomCode));
@@ -223,8 +289,7 @@ export function useRoomSync({
         setConnected(status === "SUBSCRIBED");
         if (status !== "SUBSCRIBED") return;
         mainReady = true;
-        if (role === "player")
-          await channel.track({ id: playerId, name, ...profile });
+        if (isPlayer) await trackPlayerWhenReady();
         else
           await channel.track({
             id: `display-${playerId}`,
@@ -233,17 +298,18 @@ export function useRoomSync({
             color: "purple",
             deviceRole: "display",
           });
-        if (role === "display")
+        if (isHost)
           void channel.send({
             type: "broadcast",
             event: "action-sync-request",
             payload: {},
           });
+        replayPendingAction();
         void requestSync();
       });
 
     let privateChannel: RealtimeChannel | null = null;
-    if (role === "player") {
+    if (isPlayer) {
       privateChannel = supabase.channel(`room:${roomCode}:player:${playerId}`, {
         config: { broadcast: { self: true } },
       });
@@ -269,6 +335,7 @@ export function useRoomSync({
         .subscribe((status) => {
           if (status === "SUBSCRIBED") {
             privateReady = true;
+            void trackPlayerWhenReady();
             void requestSync();
           }
         });
@@ -278,12 +345,21 @@ export function useRoomSync({
       void channel.untrack();
       void supabase.removeChannel(channel);
     };
+    const recover = () => {
+      if (document.visibilityState === "hidden" || !navigator.onLine) return;
+      void requestSync();
+      replayPendingAction();
+    };
     window.addEventListener("pagehide", leave);
+    window.addEventListener("online", recover);
+    document.addEventListener("visibilitychange", recover);
     return () => {
       closed = true;
       channelRef.current = null;
       setConnected(false);
       window.removeEventListener("pagehide", leave);
+      window.removeEventListener("online", recover);
+      document.removeEventListener("visibilitychange", recover);
       leave();
       if (privateChannel) void supabase.removeChannel(privateChannel);
     };
@@ -321,69 +397,15 @@ export function useRoomSync({
   }, [broadcast]);
 
   const sendPrivateRole = useCallback(
-    async (targetId: string, roleToSend: PalermoRole) => {
-      if (!supabase) return;
-      const target = supabase.channel(
-        `room:${code.toUpperCase()}:player:${targetId}`,
-      );
-      await new Promise<void>((resolve) => {
-        const timeout = window.setTimeout(resolve, 5000);
-        target.subscribe(async (status) => {
-          if (status === "SUBSCRIBED") {
-            await target.send({
-              type: "broadcast",
-              event: "private-role",
-              payload: { role: roleToSend },
-            });
-            window.clearTimeout(timeout);
-            resolve();
-          }
-          if (
-            status === "CHANNEL_ERROR" ||
-            status === "TIMED_OUT" ||
-            status === "CLOSED"
-          ) {
-            window.clearTimeout(timeout);
-            resolve();
-          }
-        });
-      });
-      void supabase.removeChannel(target);
-    },
-    [code],
+    (targetId: string, roleToSend: PalermoRole) =>
+      broadcast("private-role", { targetId, role: roleToSend }),
+    [broadcast],
   );
 
   const sendPrivateInvestigation = useCallback(
-    async (targetId: string, result: InvestigationResult) => {
-      if (!supabase) return;
-      const target = supabase.channel(
-        `room:${code.toUpperCase()}:player:${targetId}`,
-      );
-      await new Promise<void>((resolve) => {
-        const timeout = window.setTimeout(resolve, 5000);
-        target.subscribe(async (status) => {
-          if (status === "SUBSCRIBED") {
-            await target.send({
-              type: "broadcast",
-              event: "investigation-result",
-              payload: result,
-            });
-            window.clearTimeout(timeout);
-            resolve();
-          }
-          if (
-            status === "CHANNEL_ERROR" ||
-            status === "TIMED_OUT" ||
-            status === "CLOSED"
-          ) {
-            window.clearTimeout(timeout);
-            resolve();
-          }
-        });
-      });
-      void supabase.removeChannel(target);
-    },
-    [code],
+    (targetId: string, result: InvestigationResult) =>
+      broadcast("investigation-result", { targetId, ...result }),
+    [broadcast],
   );
 
   return {

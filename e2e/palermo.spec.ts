@@ -14,7 +14,12 @@ async function joinPlayer(
   code: string,
   name: string,
 ): Promise<PlayerDevice> {
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 1,
+    hasTouch: true,
+    isMobile: true,
+  });
   const page = await context.newPage();
   await page.goto(`${baseURL}/?room=${encodeURIComponent(code)}`);
   await page.getByLabel("Your name").fill(name);
@@ -37,7 +42,7 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
 
   try {
     await display.goto(origin);
-    await display.getByRole("button", { name: "Create a room" }).click();
+    await display.getByRole("button", { name: "Use a shared screen" }).click();
     await expect(display.getByTestId("lobby")).toBeVisible();
     await expect(display.getByTestId("connection-status")).toContainText(
       "ROOM OPEN",
@@ -192,7 +197,10 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
       "voting",
     );
     for (const device of devices)
-      await expect(device.page.getByText("ROUND 1 · VOTING")).toBeVisible();
+      await expect(device.page.getByTestId("player-controller")).toHaveAttribute(
+        "data-phase",
+        "voting",
+      );
 
     const mafiaName = [...roles.entries()].find(
       ([, role]) => role === "Mafia",
@@ -242,6 +250,111 @@ test("TV display and five phones complete a recoverable Palermo game", async ({
   }
 });
 
+test("everyone plays mode lets the laptop host receive a role and show cinematics", async ({
+  browser,
+  baseURL,
+}) => {
+  const origin = baseURL!;
+  const hostContext = await browser.newContext({ viewport: { width: 1366, height: 768 } });
+  const host = await hostContext.newPage();
+  const phones: PlayerDevice[] = [];
+  try {
+    await host.goto(origin);
+    await host.getByRole("button", { name: "Create & play" }).click();
+    await host.getByLabel("Your name").fill("Laptop host");
+    await host.getByRole("button", { name: "Create player room" }).click();
+    await expect(host.getByTestId("lobby")).toBeVisible();
+    await expect(host.getByTestId("player-count")).toHaveText("1");
+    const code = (await host.getByTestId("room-code").textContent())!.trim();
+
+    // Keep the focused test fast; narration is covered independently.
+    await host.getByTestId("narration-toggle").click();
+    for (const name of ["Nia", "Theo", "Rae"])
+      phones.push(await joinPlayer(browser, origin, code, name));
+    await expect(host.getByTestId("player-count")).toHaveText("4");
+    await host.getByTestId("start-game").click();
+
+    const participants = [
+      { name: "Laptop host", page: host },
+      ...phones.map(({ name, page }) => ({ name, page })),
+    ];
+    await Promise.all(participants.map(async (participant) => {
+      await expect(participant.page.getByTestId("player-controller")).toHaveAttribute(
+        "data-phase",
+        "role-reveal",
+      );
+      await expect(participant.page.getByTestId("palermo-3d-stage")).toBeVisible();
+      await expect(participant.page.getByTestId("private-role")).not.toHaveText(
+        "Your role",
+      );
+    }));
+    await expect(host.getByTestId("host-controls")).toBeVisible();
+    const hostRole = await host.getByTestId("private-role").textContent();
+
+    // Host authority and its private role survive a laptop reload.
+    await host.reload();
+    await expect(host.getByTestId("host-controls")).toBeVisible();
+    await expect(host.getByTestId("private-role")).toHaveText(hostRole!.trim());
+    await host
+      .getByTestId("host-controls")
+      .getByRole("button", { name: /Skip timer|Continue/ })
+      .click();
+    await expect(host.getByTestId("player-controller")).toHaveAttribute(
+      "data-phase",
+      "night",
+    );
+    await Promise.all(
+      participants.map((participant) =>
+        expect(participant.page.getByTestId("player-controller")).toHaveAttribute(
+          "data-phase",
+          "night",
+        ),
+      ),
+    );
+
+    let offlinePhone: PlayerDevice | undefined;
+    for (const phone of phones) {
+      if ((await phone.page.locator('[data-testid^="target-"]').count()) > 0) {
+        offlinePhone = phone;
+        break;
+      }
+    }
+    expect(offlinePhone).toBeTruthy();
+    if (!offlinePhone) throw new Error("Expected a phone with a night role");
+    await offlinePhone.context.setOffline(true);
+    const offlineTarget = offlinePhone.page.locator('[data-testid^="target-"]').first();
+    await offlineTarget.click();
+    await expect(offlineTarget).toHaveClass(/selected/);
+
+    for (const participant of participants) {
+      if (participant.page === offlinePhone.page) continue;
+      const target = participant.page.locator('[data-testid^="target-"]').first();
+      if (await target.count()) await target.click();
+    }
+    await offlinePhone.context.setOffline(false);
+    await offlinePhone.page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(host.getByTestId("host-controls")).toContainText("2/2 choices in");
+    await host
+      .getByTestId("host-controls")
+      .getByRole("button", { name: /Skip timer|Continue/ })
+      .click();
+
+    await Promise.all(participants.map(async (participant) => {
+      await expect(participant.page.getByTestId("player-controller")).toHaveAttribute(
+        "data-phase",
+        "night-result",
+      );
+      await expect(participant.page.getByTestId("palermo-3d-stage")).toHaveAttribute(
+        "data-cinematic",
+        "night",
+      );
+    }));
+  } finally {
+    for (const phone of phones) await phone.context.close();
+    await hostContext.close();
+  }
+});
+
 test("closing a display room cleanly releases joined phones", async ({
   browser,
   baseURL,
@@ -252,7 +365,7 @@ test("closing a display room cleanly releases joined phones", async ({
   let phone: PlayerDevice | undefined;
   try {
     await display.goto(origin);
-    await display.getByRole("button", { name: "Create a room" }).click();
+    await display.getByRole("button", { name: "Use a shared screen" }).click();
     const code = (await display.getByTestId("room-code").textContent())!.trim();
     phone = await joinPlayer(browser, origin, code, "Cleanup tester");
     await expect(display.getByTestId("player-count")).toHaveText("1");
@@ -261,10 +374,10 @@ test("closing a display room cleanly releases joined phones", async ({
       .getByRole("button", { name: "Leave room" })
       .dispatchEvent("click");
     await expect(
-      display.getByRole("button", { name: "Create a room" }),
+      display.getByRole("button", { name: "Create & play" }),
     ).toBeVisible();
     await expect(
-      phone.page.getByRole("button", { name: "Create a room" }),
+      phone.page.getByRole("button", { name: "Create & play" }),
     ).toBeVisible();
     await expect(phone.page).toHaveURL(origin + "/");
   } finally {
